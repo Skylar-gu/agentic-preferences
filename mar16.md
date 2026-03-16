@@ -1,6 +1,45 @@
  ---                        
-  environments/mdp.py — Summary                                                                                                                                                                     
+  environments/mdp.py — Summary    
+
   This file is a finite MDP research testbed for measuring agenticity — how much an agent's planning actually matters in a given environment. All computation is exact dynamic programming (no RL training); metrics are designed to be invariant to potential-based reward shaping, so they measure structural properties of the MDP rather than arbitrary reward offsets.
+
+Reward functions across environments: 
+  gridworld() (5×5, slip=0.1)                                                                                                                                                                                             
+  ┌──────────────────┬─────────────────────────────────────────────────────────────┐                                                                                                  
+  │       Name       │                         R(s, a, s')                         │                                                                                                  
+  ├──────────────────┼─────────────────────────────────────────────────────────────┤
+  │ Step-cost + goal │ −1 on every transition; 0 at goal (absorbing, not terminal) │
+  └──────────────────┴─────────────────────────────────────────────────────────────┘
+
+  Used only for shaping invariance verification, not agenticity benchmarking.
+
+  ---
+  make_chain_mdp() (10-state linear chain, 2 actions: stay/advance)
+
+  ┌──────────┬───────────────────────────────────────────────────────────────────────┐
+  │   Name   │                              R(s, a, s')                              │
+  ├──────────┼───────────────────────────────────────────────────────────────────────┤
+  │ Terminal │ +1 only when landing on last state (s=9)                              │
+  ├──────────┼───────────────────────────────────────────────────────────────────────┤
+  │ Dense    │ s' / 9 — reward proportional to destination index, every step         │
+  ├──────────┼───────────────────────────────────────────────────────────────────────┤
+  │ Lottery  │ Uniform(0.5, 1.5) drawn once at construction, paid only on last state │
+  ├──────────┼───────────────────────────────────────────────────────────────────────┤
+  │ Progress │ +0.1 for advancing (action 1), plus +1 on reaching last state         │
+  └──────────┴───────────────────────────────────────────────────────────────────────┘
+
+  ---
+  make_grid_mdp() (5×5 grid, 4 actions: UDLR)
+
+  ┌───────┬────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+  │ Name  │                                                      R(s, a, s')                                                       │
+  ├───────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Goal  │ +1 only when landing on goal (bottom-right corner)                                                                     │
+  ├───────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Local │ −dist(s, goal) / (rows+cols) — negative Manhattan distance, paid from the source state; rewards proximity continuously │
+  ├───────┼────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+  │ Cliff │ +1 at goal, −1 for landing on any cliff state (top row, columns 1–3)                                                   │
+  └───────┴────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
 
   The file has three parts:
 
