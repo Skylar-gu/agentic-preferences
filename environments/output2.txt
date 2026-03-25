@@ -1,0 +1,264 @@
+======================================================================
+WEEK 2 — SHAPING INVARIANCE VERIFICATION (5x5 gridworld, slip=0.1)
+======================================================================
+  A_ctrl = 40.397226
+  R1     = 2.961244
+  P_h(3) = 0.000000
+  Δ A_ctrl = 4.66e-09  (should be ~0)
+  Δ R1     = 3.16e-10  (should be ~0)
+  Δ P_h    = -1.07e-14  (should be ~0)
+
+======================================================================
+WEEK 3 — AGENTICITY PROXIES (shaping-invariant)
+======================================================================
+
+>>> Chain — Terminal
+  [W2] Control advantage:                 0.1458
+  [W2] One-step recovery:                 0.0234
+  [W2] Planning pressure (h=3):          0.0000
+  Advantage gap (raw / norm):             0.0411 / 0.0403
+  V*-V^rand variance (raw / norm):        0.0037 / 0.0019
+  MI|s0 (early / late / diff):            0.6071 / 0.0000 / +0.6071
+  Effective time horizon (raw / norm):    3.6200 / 0.3037
+  MCE entropy (raw / norm):               0.5878 / 0.8480
+  Advantage sparsity (diagnostic):        0.5000
+  ── COMPOSITE: 0.2921
+
+>>> Chain — Dense
+  [W2] Control advantage:                 10.9487
+  [W2] One-step recovery:                 7.9709
+  [W2] Planning pressure (h=3):          0.0000
+  Advantage gap (raw / norm):             2.2605 / 0.8957
+  V*-V^rand variance (raw / norm):        3.9465 / 0.8610
+  MI|s0 (early / late / diff):            0.8583 / 0.1748 / +0.6835
+  Effective time horizon (raw / norm):    16.9698 / 0.8168
+  MCE entropy (raw / norm):               0.5714 / 0.8243
+  Advantage sparsity (diagnostic):        0.5000
+  ── COMPOSITE: 0.8629
+
+>>> Chain — Lottery
+  [W2] Control advantage:                 0.1657
+  [W2] One-step recovery:                 0.0266
+  [W2] Planning pressure (h=3):          0.0000
+  Advantage gap (raw / norm):             0.0467 / 0.0456
+  V*-V^rand variance (raw / norm):        0.0048 / 0.0024
+  MI|s0 (early / late / diff):            0.6156 / 0.0000 / +0.6156
+  Effective time horizon (raw / norm):    3.6606 / 0.3065
+  MCE entropy (raw / norm):               0.5901 / 0.8514
+  Advantage sparsity (diagnostic):        0.5000
+  ── COMPOSITE: 0.2951
+
+>>> Chain — Progress
+  [W2] Control advantage:                 0.2048
+  [W2] One-step recovery:                 0.0307
+  [W2] Planning pressure (h=3):          0.0000
+  Advantage gap (raw / norm):             0.0630 / 0.0611
+  V*-V^rand variance (raw / norm):        0.0113 / 0.0056
+  MI|s0 (early / late / diff):            0.9954 / 0.0000 / +0.9954
+  Effective time horizon (raw / norm):    3.2538 / 0.2777
+  MCE entropy (raw / norm):               0.5953 / 0.8588
+  Advantage sparsity (diagnostic):        0.5000
+  ── COMPOSITE: 0.3667
+
+>>> Grid  — Goal
+  [W2] Control advantage:                 0.6241
+  [W2] One-step recovery:                 0.1093
+  [W2] Planning pressure (h=3):          0.0000
+  Advantage gap (raw / norm):             0.0819 / 0.0786
+  V*-V^rand variance (raw / norm):        0.0042 / 0.0021
+  MI|s0 (early / late / diff):            0.8259 / 0.0082 / +0.8177
+  Effective time horizon (raw / norm):    3.0050 / 0.2596
+  MCE entropy (raw / norm):               1.3572 / 0.9790
+  Advantage sparsity (diagnostic):        0.4167
+  ── COMPOSITE: 0.3386
+
+>>> Grid  — Local
+  [W2] Control advantage:                 5.6935
+  [W2] One-step recovery:                 0.9340
+  [W2] Planning pressure (h=3):          0.0000
+  Advantage gap (raw / norm):             0.7650 / 0.5347
+  V*-V^rand variance (raw / norm):        1.3478 / 0.4903
+  MI|s0 (early / late / diff):            0.7990 / 0.0097 / +0.7893
+  Effective time horizon (raw / norm):    1.3601 / 0.1272
+  MCE entropy (raw / norm):               1.3078 / 0.9433
+  Advantage sparsity (diagnostic):        0.4167
+  ── COMPOSITE: 0.6429
+
+>>> Grid  — Cliff
+  [W2] Control advantage:                 2.7473
+  [W2] One-step recovery:                 0.3790
+  [W2] Planning pressure (h=3):          0.0000
+  Advantage gap (raw / norm):             0.4123 / 0.3379
+  V*-V^rand variance (raw / norm):        1.4187 / 0.5080
+  MI|s0 (early / late / diff):            1.7604 / 0.0191 / +1.7413
+  Effective time horizon (raw / norm):    2.9969 / 0.2590
+  MCE entropy (raw / norm):               1.2933 / 0.9329
+  Advantage sparsity (diagnostic):        0.3854
+  ── COMPOSITE: 0.6377
+
+======================================================================
+SUMMARY (descending composite)
+======================================================================
+MDP                         Comp  AdvGp  V*var  MIdif  ASpar
+----------------------------------------------------------------------
+Chain — Dense             0.8629 0.8957 0.8610 +0.6835 0.5000
+Grid  — Local             0.6429 0.5347 0.4903 +0.7893 0.4167
+Grid  — Cliff             0.6377 0.3379 0.5080 +1.7413 0.3854
+Chain — Progress          0.3667 0.0611 0.0056 +0.9954 0.5000
+Grid  — Goal              0.3386 0.0786 0.0021 +0.8177 0.4167
+Chain — Lottery           0.2951 0.0456 0.0024 +0.6156 0.5000
+Chain — Terminal          0.2921 0.0403 0.0019 +0.6071 0.5000
+
+======================================================================
+MCE DEMO — Grid-Cliff
+======================================================================
+  alpha=0.01    J_MCE=+0.8670  L1(pi_mce,pi*)=0.6107
+  alpha=0.1     J_MCE=+2.6329  L1(pi_mce,pi*)=1.3320
+  alpha=1       J_MCE=+26.5223  L1(pi_mce,pi*)=1.4127
+  alpha=10      J_MCE=+272.0608  L1(pi_mce,pi*)=1.5478
+  (alpha->0: hard optimal | alpha->inf: uniform)
+
+======================================================================
+WEEK 4 — PAM BATCH EXPERIMENT (random MDPs, n=50 per cell)
+======================================================================
+Q1: S=5, R_type=gaussian
+Q1: S=5, R_type=uniform
+Q1: S=5, R_type=bernoulli
+Q1: S=10, R_type=gaussian
+Q1: S=10, R_type=uniform
+Q1: S=10, R_type=bernoulli
+Q2: structure=random, S=5, R_type=gaussian
+Q2: structure=random, S=5, R_type=uniform
+Q2: structure=random, S=5, R_type=bernoulli
+Q2: structure=random, S=10, R_type=gaussian
+Q2: structure=random, S=10, R_type=uniform
+Q2: structure=random, S=10, R_type=bernoulli
+  scoring Chain-Terminal...
+  scoring Chain-Dense...
+  scoring Chain-Lottery...
+  scoring Chain-Progress...
+  scoring Grid-Goal...
+  scoring Grid-Local...
+  scoring Grid-Cliff...
+
+======================================================================
+Q1 — PAM DISTRIBUTIONS (T fixed, R varies)
+    norm = normalised [0,1]  |  raw = original scale
+======================================================================
+
+  S=5 bernoulli
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent
+  norm mean            0.5156   0.0087      N/A   0.8005   0.9686
+  norm std             0.0597   0.0072      N/A   0.0014   0.0085
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent ctrl_adv one_stepplan_press
+  raw mean             0.7320   0.0175      N/A  16.1183   1.3428   7.2283   7.2289   0.0000
+  raw std              0.1186   0.0146      N/A   0.0688   0.0118   1.3108   1.3108   0.0000
+  Pearson corr      [adv_gap, vstar_var, h_eff, mce_ent]
+    adv_gap           1.000    0.103    0.355   -0.772
+    vstar_var         0.103    1.000    0.164   -0.197
+    h_eff             0.355    0.164    1.000   -0.053
+    mce_ent          -0.772   -0.197   -0.053    1.000
+
+  S=5 gaussian
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent
+  norm mean            0.7702   0.0436      N/A   0.8014   0.8876
+  norm std             0.0785   0.0417      N/A   0.0023   0.0456
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent ctrl_adv one_stepplan_press
+  raw mean             1.5310   0.0911      N/A  16.1656   1.2305  15.0461  15.0400   0.0000
+  raw std              0.3562   0.0906      N/A   0.1147   0.0632   4.1075   4.1040   0.0000
+  Pearson corr      [adv_gap, vstar_var, h_eff, mce_ent]
+    adv_gap           1.000    0.544    0.088   -0.889
+    vstar_var         0.544    1.000    0.267   -0.588
+    h_eff             0.088    0.267    1.000   -0.032
+    mce_ent          -0.889   -0.588   -0.032    1.000
+
+  S=5 uniform
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent
+  norm mean            0.3468   0.0032      N/A   0.8004   0.9890
+  norm std             0.0424   0.0030      N/A   0.0009   0.0032
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent ctrl_adv one_stepplan_press
+  raw mean             0.4280   0.0064      N/A  16.1168   1.3711   4.2730   4.2728   0.0000
+  raw std              0.0655   0.0061      N/A   0.0434   0.0045   0.8343   0.8350   0.0000
+  Pearson corr      [adv_gap, vstar_var, h_eff, mce_ent]
+    adv_gap           1.000    0.150   -0.030   -0.897
+    vstar_var         0.150    1.000    0.195   -0.300
+    h_eff            -0.030    0.195    1.000    0.151
+    mce_ent          -0.897   -0.300    0.151    1.000
+
+  S=10 bernoulli
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent
+  norm mean            0.5493   0.0135      N/A   0.8018   0.9632
+  norm std             0.0354   0.0062      N/A   0.0018   0.0067
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent ctrl_adv one_stepplan_press
+  raw mean             0.8001   0.0273      N/A  16.1867   1.3353   8.2021   8.2210   0.0000
+  raw std              0.0802   0.0127      N/A   0.0936   0.0093   0.9973   1.0156   0.0000
+  Pearson corr      [adv_gap, vstar_var, h_eff, mce_ent]
+    adv_gap           1.000    0.023    0.010   -0.857
+    vstar_var         0.023    1.000    0.212   -0.137
+    h_eff             0.010    0.212    1.000    0.194
+    mce_ent          -0.857   -0.137    0.194    1.000
+
+  S=10 gaussian
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent
+  norm mean            0.8082   0.0966      N/A   0.8024   0.8669
+  norm std             0.0537   0.0785      N/A   0.0040   0.0397
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent ctrl_adv one_stepplan_press
+  raw mean             1.7006   0.2119      N/A  16.2168   1.2018  17.0924  17.1214   0.0000
+  raw std              0.3371   0.1917      N/A   0.2055   0.0551   4.1412   4.2499   0.0000
+  Pearson corr      [adv_gap, vstar_var, h_eff, mce_ent]
+    adv_gap           1.000    0.620    0.430   -0.887
+    vstar_var         0.620    1.000    0.202   -0.719
+    h_eff             0.430    0.202    1.000   -0.328
+    mce_ent          -0.887   -0.719   -0.328    1.000
+
+  S=10 uniform
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent
+  norm mean            0.3815   0.0068      N/A   0.8023   0.9870
+  norm std             0.0440   0.0048      N/A   0.0025   0.0033
+                      adv_gapvstar_var  mi_diff    h_eff  mce_ent ctrl_adv one_stepplan_press
+  raw mean             0.4829   0.0137      N/A  16.2088   1.3682   4.9206   4.9371   0.0000
+  raw std              0.0706   0.0097      N/A   0.1262   0.0045   0.9802   1.0083   0.0000
+  Pearson corr      [adv_gap, vstar_var, h_eff, mce_ent]
+    adv_gap           1.000    0.395    0.355   -0.802
+    vstar_var         0.395    1.000    0.579   -0.109
+    h_eff             0.355    0.579    1.000    0.004
+    mce_ent          -0.802   -0.109    0.004    1.000
+
+======================================================================
+Q2 — T vs R VARIANCE DECOMPOSITION
+  ratio = between_T_var / total_var  (>0.5 → T dominates)
+======================================================================
+  T_struct   S     R_type        within_var  between_var   ratio  verdict
+  ----------------------------------------------------------------------
+  random     5     bernoulli        0.00040      0.00001   0.020  R dominates
+  random     5     gaussian         0.00510      0.00003   0.005  R dominates
+  random     5     uniform          0.00054      0.00003   0.047  R dominates
+  random     10    bernoulli        0.00023      0.00001   0.039  R dominates
+  random     10    gaussian         0.00248      0.00006   0.022  R dominates
+  random     10    uniform          0.00032      0.00003   0.090  R dominates
+
+======================================================================
+Q3 — HUMAN-MADE MDPs
+  Note: chains have A=2, grids have A=4. MCE entropy is H/log(A),
+  so grids mechanically score higher — control for |A| before comparing.
+======================================================================
+  MDP                     |A|     comp  adv_gap    v*var    h_eff  mce_ent ctrl_adv one_stepplan_press
+  -----------------------------------------------------------------------------------------------
+  Chain-Dense               2   0.8743   0.8957   0.8610   0.8169   0.8243   0.4191   0.3270   0.0000
+  Grid-Local                4   0.5074   0.5347   0.4903   0.1277   0.9433   0.2460   0.0453   0.0000
+  Grid-Cliff                4   0.4426   0.3379   0.5080   0.2575   0.9329   0.1274   0.0187   0.0000
+  Grid-Goal                 4   0.0315   0.0786   0.0021   0.2654   0.9790   0.0305   0.0054   0.0000
+  Chain-Progress            2   0.0270   0.0611   0.0056   0.2782   0.8588   0.0101   0.0015   0.0000
+  Chain-Lottery             2   0.0190   0.0456   0.0024   0.3135   0.8514   0.0082   0.0013   0.0000
+  Chain-Terminal            2   0.0166   0.0403   0.0019   0.3087   0.8480   0.0072   0.0012   0.0000
+
+  MI column: excluded (compute_mi=False).
+
+======================================================================
+MCE DEMO — Chain-Dense
+======================================================================
+  alpha=0.01    J_MCE=+16.8148  L1(pi_mce,pi*)=0.1000
+  alpha=0.1     J_MCE=+16.8555  L1(pi_mce,pi*)=0.2005
+  alpha=1       J_MCE=+20.4498  L1(pi_mce,pi*)=0.9660
+  alpha=10      J_MCE=+75.6014  L1(pi_mce,pi*)=1.2266
+  (alpha->0: hard optimal | alpha->inf: uniform)
