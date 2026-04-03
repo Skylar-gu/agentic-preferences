@@ -21,7 +21,8 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.gridspec import GridSpec
 
-from experiments import run_pam_experiment
+from runners import run_pam_experiment, random_mdp
+from core import MDP
 
 # ---------------------------------------------------------------------------
 # Config
@@ -65,6 +66,7 @@ results = run_pam_experiment(
     k=3,
     R_types=['gaussian', 'uniform', 'bernoulli', 'potential', 'goal'],
     n_fixed_T=5,
+    T_structures=['dirichlet_0.1', 'dirichlet_1.0', 'dirichlet_10.0'],
     rng_seed=42,
     verbose=False,
     include_mi=False,
@@ -78,9 +80,9 @@ print("Done.\n")
 # ===========================================================================
 print("Plot 1: Q3 heatmap")
 
-PAM_DISPLAY = ['adv_gap_norm', 'vstar_var_norm', 'h_eff_norm',
+PAM_DISPLAY = ['adv_gap_norm', 'vstar_var_norm', 'H_eps_norm',
                'mce_entropy_norm', 'ctrl_adv_norm', 'one_step_norm', 'composite']
-PAM_LABELS  = ['Adv\nGap', 'V*\nVar', 'H\nEff', 'MCE\nEnt', 'Ctrl\nAdv', 'OneStep\nRec', 'Composite']
+PAM_LABELS  = ['Adv\nGap', 'V*\nVar', 'H\nEps', 'MCE\nEnt', 'Ctrl\nAdv', 'OneStep\nRec', 'Composite']
 
 mdp_order = sorted(q3.keys(), key=lambda n: -q3[n]['composite'])
 matrix = np.array([[q3[n].get(p, 0.0) or 0.0 for p in PAM_DISPLAY] for n in mdp_order])
@@ -108,8 +110,8 @@ save(fig, '01_q3_heatmap.png')
 # ===========================================================================
 print("Plot 2: Q3 grouped bar")
 
-metrics_bar = ['adv_gap_norm', 'vstar_var_norm', 'h_eff_norm', 'ctrl_adv_norm', 'composite']
-labels_bar  = ['Adv Gap', 'V* Var', 'H Eff', 'Ctrl Adv', 'Composite']
+metrics_bar = ['adv_gap_norm', 'vstar_var_norm', 'H_eps_norm', 'ctrl_adv_norm', 'composite']
+labels_bar  = ['Adv Gap', 'V* Var', 'H Eps', 'Ctrl Adv', 'Composite']
 n_mdp = len(mdp_order)
 n_met = len(metrics_bar)
 x = np.arange(n_mdp)
@@ -141,11 +143,11 @@ save(fig, '02_q3_grouped_bar.png')
 print("Plot 3: Q1 box plots by R_type")
 
 R_TYPES = ['gaussian', 'uniform', 'bernoulli', 'potential', 'goal']
-# col indices in norm vector: 0=adv_gap, 1=vstar_var, 3=h_eff, 4=mce_entropy
+# col indices in norm vector: 0=adv_gap, 1=vstar_var, 3=H_eps, 4=mce_entropy
 pam_indices = [0, 1, 3, 4]
-pam_names   = ['adv_gap_norm', 'vstar_var_norm', 'h_eff_norm', 'mce_entropy_norm']
+pam_names   = ['adv_gap_norm', 'vstar_var_norm', 'H_eps_norm', 'mce_entropy_norm']
 pam_titles  = ['Advantage Gap (norm)', 'V*−Vrand Variance (norm)',
-               'Effective Time Horizon (norm)', 'MCE Policy Entropy (norm)']
+               'Planning Horizon H_eps (norm)', 'MCE Policy Entropy (norm)']
 S_show = 10
 
 fig, axes = plt.subplots(1, 4, figsize=(16, 5))
@@ -179,23 +181,34 @@ structures = sorted(set(k[0] for k in q2))
 S_vals_q2  = sorted(set(k[1] for k in q2))
 R_types_q2 = sorted(set(k[2] for k in q2))
 
+# Human-readable labels for Dirichlet structures
+def _struct_label(s):
+    if s.startswith('dirichlet_'):
+        alpha = s.split('_', 1)[1]
+        return f'Dir(α={alpha})'
+    return s
+
 n_s = len(S_vals_q2)
 n_r = len(R_types_q2)
+bar_w = 0.22
+colors_q2 = ['#4C72B0', '#DD8452', '#55A868']
+
 fig, axes = plt.subplots(1, n_s, figsize=(5 * n_s, 5), sharey=True)
 if n_s == 1:
     axes = [axes]
 
 for ax, S in zip(axes, S_vals_q2):
     x_pos = np.arange(n_r)
-    for si, struct in enumerate(structures):
+    for si, (struct, color) in enumerate(zip(structures, colors_q2)):
         ratios = []
         for rt in R_types_q2:
             key = (struct, S, rt)
             v   = q2.get(key, {})
             ratios.append(v.get('ratio', float('nan')))
 
-        offset = si * 0.25 - (len(structures)-1)*0.25/2
-        bars = ax.bar(x_pos + offset, ratios, 0.2, label=struct, alpha=0.8)
+        offset = (si - (len(structures) - 1) / 2) * bar_w
+        ax.bar(x_pos + offset, ratios, bar_w, label=_struct_label(struct),
+               color=color, alpha=0.85)
 
     ax.axhline(0.5, color='red', lw=1.2, ls='--', label='50% threshold')
     ax.set_xticks(x_pos)
@@ -206,7 +219,8 @@ for ax, S in zip(axes, S_vals_q2):
     ax.legend(fontsize=7)
 
 fig.suptitle('Q2 — Fraction of composite variance explained by T (vs R)\n'
-             'Low ratio → reward structure drives agenticity, not topology',
+             'Dir(α=0.1)=near-deterministic  α=1.0=balanced  α=10.0=near-uniform\n'
+             'Low ratio → R drives agenticity; high ratio → T topology dominates',
              fontsize=10)
 fig.tight_layout()
 save(fig, '04_q2_variance_decomp.png')
@@ -248,7 +262,7 @@ save(fig, '05_q1_scatter_gap_vs_entropy.png')
 # ===========================================================================
 print("Plot 6: Q1 radar chart — mean PAM profile by R_type")
 
-PAMS_RADAR = ['adv_gap', 'vstar_var', 'h_eff', 'mce_entropy']
+PAMS_RADAR = ['adv_gap', 'vstar_var', 'H_eps', 'mce_entropy']
 RADAR_IDX  = [0, 1, 3, 4]
 N = len(PAMS_RADAR)
 angles = np.linspace(0, 2 * np.pi, N, endpoint=False).tolist()
@@ -274,6 +288,127 @@ fig.suptitle('Q1 — Mean normalised PAM profile by R_type\n'
              fontsize=10)
 fig.tight_layout()
 save(fig, '06_q1_radar_by_Rtype.png')
+
+
+# ===========================================================================
+# Plot 7 — Reward-distribution agenticity: histograms + high-agency fraction
+# ===========================================================================
+print("Plot 7: reward distribution agenticity (histograms + high-agency fraction)")
+
+HIGH_AGENCY_THRESHOLD = 0.5
+
+# (col_idx, key_in_q1, display_title)
+DIST_METRICS = [
+    (0, 'adv_gap_norm',    'Advantage Gap (norm)'),
+    (1, 'vstar_var_norm',  'V*−V^rand Variance (norm)'),
+    (3, 'H_eps_norm',      'Planning Horizon H_eps (norm)'),
+    (4, 'mce_entropy_norm','MCE Policy Entropy (norm)'),
+]
+n_metrics = len(DIST_METRICS)
+S_dist = 10  # fix S for this plot
+
+fig, axes = plt.subplots(1, n_metrics, figsize=(5 * n_metrics, 5))
+fig.suptitle(
+    f'Agenticity distributions by reward type  (S={S_dist}, T fixed, n={results["meta"]["n_random_mdps"]})\n'
+    f'Dashed line = high-agency threshold ({HIGH_AGENCY_THRESHOLD}); '
+    f'fraction label = proportion above threshold',
+    fontsize=10,
+)
+
+for ax, (col_idx, _, title) in zip(axes, DIST_METRICS):
+    for rt in R_TYPES:
+        mat = q1.get((S_dist, rt))
+        if mat is None:
+            continue
+        vals = mat[:, col_idx]
+        vals = vals[~np.isnan(vals)]
+        frac_high = (vals >= HIGH_AGENCY_THRESHOLD).mean()
+        color = PALETTE[rt]
+        ax.hist(vals, bins=20, range=(0, 1), alpha=0.45, color=color,
+                label=f'{rt} ({frac_high:.0%})', density=True)
+
+    ax.axvline(HIGH_AGENCY_THRESHOLD, color='black', lw=1.4, ls='--', alpha=0.7)
+    ax.set_xlim(0, 1)
+    ax.set_xlabel('Normalised score', fontsize=9)
+    ax.set_ylabel('Density', fontsize=9)
+    ax.set_title(title, fontsize=9)
+    ax.legend(fontsize=7, title='R type (% high)', title_fontsize=7)
+
+fig.tight_layout()
+save(fig, '07_reward_dist_agenticity.png')
+
+
+# ===========================================================================
+# Plot 8 — R_scale sweep: how reward variance drives agenticity (Gaussian)
+# ===========================================================================
+print("Plot 8: R_scale sweep for Gaussian rewards")
+
+R_SCALES   = [0.1, 0.5, 1.0, 2.0, 5.0]
+N_SCALE    = results['meta']['n_random_mdps']
+S_scale    = 10
+A_scale    = 4
+gamma_sc   = 0.95
+rng_sc     = np.random.default_rng(99)
+
+# One fixed canonical T for all scale sweeps
+canonical_sc = random_mdp(S_scale, A_scale, gamma=gamma_sc, k=3,
+                           R_type='gaussian', terminal_states=1,
+                           rng=np.random.default_rng(7))
+T_sc       = canonical_sc.T
+term_sc    = canonical_sc.terminal
+d0_sc      = canonical_sc.d0
+
+SCALE_CMAP = plt.cm.viridis
+scale_colors = [SCALE_CMAP(i / (len(R_SCALES) - 1)) for i in range(len(R_SCALES))]
+
+# (col_idx, display_title)
+SCALE_METRICS = [
+    (0, 'Advantage Gap (norm)'),
+    (1, 'V*−V^rand Variance (norm)'),
+    (3, 'Planning Horizon H_eps (norm)'),
+    (4, 'MCE Policy Entropy (norm)'),
+]
+
+scale_data = {}  # R_scale -> (N, n_metrics) array
+for R_scale in R_SCALES:
+    rows = []
+    for _ in range(N_SCALE):
+        tmp = random_mdp(S_scale, A_scale, gamma=gamma_sc, k=3,
+                         R_type='gaussian', R_scale=R_scale, terminal_states=1,
+                         rng=np.random.default_rng(int(rng_sc.integers(0, 2**31))))
+        mdp_sc = MDP(S=S_scale, A=A_scale, T=T_sc, R=tmp.R,
+                     gamma=gamma_sc, terminal=term_sc, d0=d0_sc.copy())
+        from pams import agenticity_score as _agscore
+        r = _agscore(mdp_sc, verbose=False, compute_mi=False,
+                     rng=np.random.default_rng(int(rng_sc.integers(0, 2**31))))
+        rows.append([r['adv_gap_norm'], r['vstar_var_norm'],
+                     r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
+                     r['H_eps_norm'], r['mce_entropy_norm']])
+    scale_data[R_scale] = np.array(rows)
+
+fig, axes = plt.subplots(1, len(SCALE_METRICS), figsize=(5 * len(SCALE_METRICS), 5))
+fig.suptitle(
+    f'Agenticity vs reward scale  (Gaussian, S={S_scale}, T fixed, n={N_SCALE})\n'
+    f'Lower R_scale = flatter reward landscape → planning should matter less',
+    fontsize=10,
+)
+
+for ax, (col_idx, title) in zip(axes, SCALE_METRICS):
+    for R_scale, color in zip(R_SCALES, scale_colors):
+        vals = scale_data[R_scale][:, col_idx]
+        vals = vals[~np.isnan(vals)]
+        frac = (vals >= HIGH_AGENCY_THRESHOLD).mean()
+        ax.hist(vals, bins=20, range=(0, 1), alpha=0.45, color=color, density=True,
+                label=f'σ={R_scale} ({frac:.0%})')
+    ax.axvline(HIGH_AGENCY_THRESHOLD, color='black', lw=1.4, ls='--', alpha=0.7)
+    ax.set_xlim(0, 1)
+    ax.set_xlabel('Normalised score', fontsize=9)
+    ax.set_ylabel('Density', fontsize=9)
+    ax.set_title(title, fontsize=9)
+    ax.legend(fontsize=7, title='R_scale (% high)', title_fontsize=7)
+
+fig.tight_layout()
+save(fig, '08_rscale_sweep_agenticity.png')
 
 
 print("\nAll plots saved to environments/figures/")

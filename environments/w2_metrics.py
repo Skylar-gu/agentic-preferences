@@ -1,11 +1,11 @@
 """
-week2.py — Week 2 shaping-invariant metrics.
+w2_metrics.py — Week 2 shaping-invariant metrics.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
-from core import MDP, value_iteration, policy_evaluation, discounted_occupancy, finite_horizon_lookahead_policy
+from core import MDP, value_iteration, policy_evaluation, discounted_occupancy
 
 
 # ---------------------------------------------------------------------------
@@ -35,14 +35,3 @@ def one_step_recovery(mdp: MDP, pi_baseline):
     rand_kernel = mdp.T.mean(axis=1)  # (S, S)
     dist_S0 = d_star @ rand_kernel
     return float(dist_S0 @ (V_star - V0))
-
-
-def planning_pressure(mdp: MDP, h: int):
-    """
-    P_h = E_{s~d0}[ V*(s) - V^{pi_h}(s) ] where pi_h is depth-h
-    lookahead with V* terminal bootstrap.
-    """
-    V_star, _, _ = value_iteration(mdp)
-    _, pi_h = finite_horizon_lookahead_policy(mdp, h, V_terminal=V_star)
-    V_pi_h = policy_evaluation(mdp, pi_h)
-    return float(mdp.d0 @ (V_star - V_pi_h))

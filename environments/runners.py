@@ -1,12 +1,12 @@
 """
-experiments.py — Batch experiment machinery.
+runners.py — Batch experiment runners.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 from core import MDP
-from week3 import agenticity_score
+from pams import agenticity_score
 from envs import make_chain_mdp, make_grid_mdp
 
 
@@ -22,26 +22,36 @@ def random_mdp(
     R_type: str = 'gaussian',
     R_scale: float = 1.0,
     terminal_states: int = 1,
+    T_type: str = 'random',
+    T_alpha: float = 0.1,
     rng: np.random.Generator = None,
 ) -> MDP:
     """
     Generate a random tabular MDP.
 
-    Transition: for each (s,a) pair, sample k successor states uniformly
-    without replacement from non-terminal states, assign Dirichlet(1,...,1)
-    weights. Terminal states are absorbing (T[s,a,s]=1).
+    Transition types (T_type):
+      'random':      for each (s,a), sample k successors from non-terminal states,
+                     assign Dirichlet(1,...,1) weights. (default)
+      'uniform':     T[s,a,s'] = 1/S for all s' (fully mixing).
+      'dirichlet':   like 'random' but uses Dirichlet(T_alpha,...,T_alpha) weights.
+                     Low T_alpha (e.g. 0.1) → highly concentrated / near-deterministic.
+      'deterministic': each (s,a) transitions to a single randomly chosen successor.
 
-    Reward types:
-      'gaussian':  R[s,a,s'] ~ N(0, R_scale)
-      'uniform':   R[s,a,s'] ~ Uniform(0, 1)
-      'bernoulli': R[s,a,s'] = 1 w.p. R_scale, else 0
-                   (R_scale is the sparsity; default 0.1 for sparse rewards)
-      'potential': R(s,a,s') = gamma*Phi(s') - Phi(s), Phi(s) ~ N(0, R_scale).
-                   Non-agentic by construction — does not change policy ordering.
-                   Useful as a negative control: PAMs should score these low.
-      'goal':      R(s,a,s') = 1[s'=g] for a uniformly random non-terminal goal g.
-                   Goal-conditioned sparse reward; structurally realistic for
-                   navigation domains. Agenticity varies with goal location.
+    T_alpha: concentration parameter for 'dirichlet' T_type (default 0.1).
+
+    Reward types (R_type):
+      'gaussian':   R[s,a,s'] ~ N(0, R_scale)
+      'uniform':    R[s,a,s'] ~ Uniform(0, 1)
+      'bernoulli':  R[s,a,s'] = 1 w.p. R_scale, else 0
+                    (R_scale is the sparsity; default 0.1 for sparse rewards)
+      'spike_slab': R[s,a,s'] = mask * N(0,1), mask ~ Bernoulli(R_scale).
+                    R_scale = p = sparsity probability; non-zero magnitude ~ N(0,1).
+      'potential':  R(s,a,s') = gamma*Phi(s') - Phi(s), Phi(s) ~ N(0, R_scale).
+                    Non-agentic by construction — does not change policy ordering.
+                    Useful as a negative control: PAMs should score these low.
+      'goal':       R(s,a,s') = 1[s'=g] for a uniformly random non-terminal goal g.
+                    Goal-conditioned sparse reward; structurally realistic for
+                    navigation domains. Agenticity varies with goal location.
 
     Terminal states: last `terminal_states` indices {S-terminal_states, ..., S-1}.
     d0: uniform over non-terminal states.
@@ -52,18 +62,62 @@ def random_mdp(
     terminal = set(range(S - terminal_states, S)) if terminal_states > 0 else set()
     non_terminal = [s for s in range(S) if s not in terminal]
 
-    T = np.zeros((S, A, S))
+    def _build_T():
+        T = np.zeros((S, A, S))
+        for s in range(S):
+            for a in range(A):
+                if s in terminal:
+                    T[s, a, s] = 1.0
+                    continue
+                pool = non_terminal if non_terminal else list(range(S))
+                if T_type == 'uniform':
+                    T[s, a, :] = 1.0 / S
+                elif T_type == 'deterministic':
+                    T[s, a, int(rng.choice(pool))] = 1.0
+                elif T_type == 'dirichlet':
+                    k_eff = min(k, len(pool))
+                    successors = rng.choice(pool, size=k_eff, replace=False)
+                    T[s, a, successors] = rng.dirichlet(np.full(k_eff, T_alpha))
+                else:  # 'random'
+                    k_eff = min(k, len(pool))
+                    successors = rng.choice(pool, size=k_eff, replace=False)
+                    T[s, a, successors] = rng.dirichlet(np.ones(k_eff))
+        return T
 
-    for s in range(S):
-        for a in range(A):
-            if s in terminal:
-                T[s, a, s] = 1.0
-                continue
-            pool = non_terminal if non_terminal else list(range(S))
-            k_eff = min(k, len(pool))
-            successors = rng.choice(pool, size=k_eff, replace=False)
-            weights = rng.dirichlet(np.ones(k_eff))
-            T[s, a, successors] = weights
+    def _find_reachable_goal(T):
+        """BFS backwards from each candidate goal; return first reachable from all non-terminal states, or None."""
+        adj = (T > 0).any(axis=1)  # (S, S)
+        pool = non_terminal if non_terminal else list(range(S))
+        for candidate in rng.permutation(pool):
+            can_reach = {int(candidate)}
+            frontier = [int(candidate)]
+            while frontier:
+                nxt = []
+                for tgt in frontier:
+                    for s in np.where(adj[:, tgt])[0]:
+                        if s not in can_reach:
+                            can_reach.add(int(s))
+                            nxt.append(int(s))
+                frontier = nxt
+            if all(s in can_reach for s in non_terminal):
+                return int(candidate)
+        return None
+
+    if R_type == 'goal':
+        # Resample T until a goal reachable from all non-terminal states exists.
+        for _ in range(100):
+            T = _build_T()
+            g = _find_reachable_goal(T)
+            if g is not None:
+                break
+        else:
+            raise RuntimeError(
+                f"random_mdp: could not find a T with a universally reachable goal "
+                f"after 100 attempts (S={S}, A={A}, T_type={T_type!r}, k={k}). "
+                "Try increasing k or using T_type='random'."
+            )
+    else:
+        T = _build_T()
 
     if R_type == 'gaussian':
         R = rng.normal(0, R_scale, size=(S, A, S))
@@ -77,14 +131,16 @@ def random_mdp(
         R = gamma * Phi[None, None, :] - Phi[:, None, None]
         R = np.broadcast_to(R, (S, A, S)).copy()
     elif R_type == 'goal':
-        pool = non_terminal if non_terminal else list(range(S))
-        g = int(rng.choice(pool))
+        # g was selected during T-sampling above (guaranteed reachable from all non-terminal states)
         R = np.zeros((S, A, S))
         R[:, :, g] = 1.0
+    elif R_type == 'spike_slab':
+        mask = (rng.uniform(0, 1, size=(S, A, S)) < R_scale).astype(float)
+        R = mask * rng.normal(0, 1.0, size=(S, A, S))
     else:
         raise ValueError(
             f"Unknown R_type: {R_type!r}. "
-            "Choose 'gaussian', 'uniform', 'bernoulli', 'potential', or 'goal'."
+            "Choose 'gaussian', 'uniform', 'bernoulli', 'potential', 'goal', or 'spike_slab'."
         )
 
     for s in terminal:
@@ -92,7 +148,7 @@ def random_mdp(
 
     d0 = np.zeros(S)
     if non_terminal:
-        d0[non_terminal] = 1.0 / len(non_terminal)
+        d0[non_terminal] = 1.0 / len(non_terminal) # ensure you start off in a non-terminal state, if any exist
     else:
         d0[:] = 1.0 / S
 
@@ -103,14 +159,13 @@ def random_mdp(
 # W2 normalization utility
 # ---------------------------------------------------------------------------
 
-def norm_w2(ctrl_adv, one_step, plan_press, scales):
+def norm_w2(ctrl_adv, one_step, scales):
     """Normalize W2 metrics using empirical 95th-pct scales: 1-exp(-x/scale)."""
     def _n(x, s):
         return float(1 - np.exp(-x / s)) if s > 1e-10 else 0.0
     return {
-        'ctrl_adv_norm':   _n(ctrl_adv,  scales.get('ctrl_adv', 1.0)),
-        'one_step_norm':   _n(one_step,  scales.get('one_step', 1.0)),
-        'plan_press_norm': _n(plan_press, scales.get('plan_press', 1.0)),
+        'ctrl_adv_norm': _n(ctrl_adv, scales.get('ctrl_adv', 1.0)),
+        'one_step_norm': _n(one_step, scales.get('one_step', 1.0)),
     }
 
 
@@ -180,7 +235,7 @@ def run_pam_experiment(
             r['adv_gap_norm'],
             r['vstar_var_norm'],
             r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
-            r['h_eff_norm'],
+            r['H_eps_norm'],
             r['mce_entropy_norm'],
         ])
 
@@ -189,11 +244,10 @@ def run_pam_experiment(
             r['adv_gap'],
             r['vstar_var_raw'],
             r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
-            r['h_eff_raw'],
+            r['H_eps'],
             r['mce_entropy_raw'],
             r['ctrl_adv'],
             r['one_step_recovery'],
-            r['planning_pressure'],
         ])
 
     def _r_scale_for(R_type):
@@ -204,7 +258,12 @@ def run_pam_experiment(
         non_term = [s for s in range(S) if s not in terminal]
         T = np.zeros((S, A, S))
 
-        if structure == 'random':
+        # 'dirichlet_{alpha}' — Dirichlet(alpha,...,alpha) weights over k successors.
+        # 'random' is an alias for 'dirichlet_1.0'.
+        if structure == 'random' or structure.startswith('dirichlet_'):
+            alpha = 1.0
+            if structure.startswith('dirichlet_'):
+                alpha = float(structure.split('_', 1)[1])
             for s in range(S):
                 for a in range(A):
                     if s in terminal:
@@ -213,7 +272,7 @@ def run_pam_experiment(
                     pool = non_term if non_term else list(range(S))
                     k_eff = min(k, len(pool))
                     succ = local_rng.choice(pool, size=k_eff, replace=False)
-                    T[s, a, succ] = local_rng.dirichlet(np.ones(k_eff))
+                    T[s, a, succ] = local_rng.dirichlet(np.full(k_eff, alpha))
 
         elif structure == 'chain':
             # A0=advance, A1=retreat, A2=stay, A3=noisy-advance
@@ -252,7 +311,7 @@ def run_pam_experiment(
                 T[s, :, s] = 1.0
         else:
             raise ValueError(f"Unknown T_structure: {structure!r}. "
-                             "Choose 'random', 'chain', or 'grid'.")
+                             "Choose 'random', 'dirichlet_{{alpha}}', 'chain', or 'grid'.")
         return T
 
     # ------------------------------------------------------------------
@@ -295,12 +354,12 @@ def run_pam_experiment(
     # Compute empirical 95th-percentile W2 scales from Q1 raw data
     # ------------------------------------------------------------------
     def _compute_w2_scales(q1_raw_dict, percentile=95):
-        pools = [[], [], []]  # ctrl_adv, one_step, plan_press
+        pools = [[], []]  # ctrl_adv, one_step
         for mat in q1_raw_dict.values():
-            for i in range(5, 8):
+            for i in range(5, 7):
                 col = mat[:, i]
                 pools[i-5].extend(col[~np.isnan(col)].tolist())
-        keys = ['ctrl_adv', 'one_step', 'plan_press']
+        keys = ['ctrl_adv', 'one_step']
         return {k: float(np.percentile(v, percentile)) if v else 1.0
                 for k, v in zip(keys, pools)}
 
@@ -378,7 +437,7 @@ def run_pam_experiment(
             print(f"  scoring {name}...")
         r = _score_mdp(mdp)
         q3[name] = {**r, **norm_w2(r['ctrl_adv'], r['one_step_recovery'],
-                                    r['planning_pressure'], w2_scales),
+                                    w2_scales),
                     'n_actions': mdp.A}
 
     meta = {
@@ -403,8 +462,8 @@ def run_pam_experiment(
 
 def _print_pam_results(results: dict) -> None:
     """Pretty-print Q1/Q2/Q3 results from run_pam_experiment."""
-    PAM_COLS = ['adv_gap', 'vstar_var', 'mi_diff', 'h_eff', 'mce_ent']
-    PAM_COLS_RAW = ['adv_gap', 'vstar_var', 'mi_diff', 'h_eff', 'mce_ent', 'ctrl_adv', 'one_step', 'plan_press']
+    PAM_COLS = ['adv_gap', 'vstar_var', 'mi_diff', 'H_eps', 'mce_ent']
+    PAM_COLS_RAW = ['adv_gap', 'vstar_var', 'mi_diff', 'H_eps', 'mce_ent', 'ctrl_adv', 'one_step']
     W = 9  # column width
 
     def _fmt(v, w, decimals=4):
@@ -483,10 +542,10 @@ def _print_pam_results(results: dict) -> None:
     print("  so grids mechanically score higher — control for |A| before comparing.")
     print("=" * 70)
     score_cols = ['composite', 'adv_gap_norm', 'vstar_var_norm', 'h_eff_norm', 'mce_entropy_norm',
-                  'ctrl_adv_norm', 'one_step_norm', 'plan_press_norm']
-    hdrs3 = ['comp', 'adv_gap', 'v*var', 'h_eff', 'mce_ent', 'ctrl_adv', 'one_step', 'plan_press']
+                  'ctrl_adv_norm', 'one_step_norm']
+    hdrs3 = ['comp', 'adv_gap', 'v*var', 'h_eff', 'mce_ent', 'ctrl_adv', 'one_step']
     print(f"  {'MDP':<22s} {'|A|':>4s}" + "".join(f"{h:>9s}" for h in hdrs3))
-    print("  " + "-" * 95)
+    print("  " + "-" * 86)
     rows = [(name, r) for name, r in results['q3'].items()]
     for name, r in sorted(rows, key=lambda x: -x[1]['composite']):
         a_str = f"{r['n_actions']:>4d}"
@@ -494,3 +553,179 @@ def _print_pam_results(results: dict) -> None:
         print(f"  {name:<22s} {a_str}{vals}")
 
     print(f"\n  MI column: {'included' if results['meta']['include_mi'] else 'excluded (compute_mi=False)'}.")
+
+
+# ---------------------------------------------------------------------------
+# Group 1: p-sweep helper (bernoulli and spike_slab)
+# ---------------------------------------------------------------------------
+
+def run_p_sweep(
+    R_type: str,
+    p_values: list,
+    S: int = 10,
+    A: int = 4,
+    gamma: float = 0.95,
+    k: int = 3,
+    n_mdps: int = 50,
+    rng_seed: int = 42,
+) -> dict:
+    """
+    Group 1: fix one canonical T, sweep R_scale=p for R_type in p_values.
+    Returns {p: [agenticity_score dicts]}.
+    """
+    rng = np.random.default_rng(rng_seed)
+    canonical = random_mdp(S, A, gamma=gamma, k=k, R_type='gaussian',
+                           terminal_states=1, rng=np.random.default_rng(0))
+    T_fixed, term_fixed, d0_fixed = canonical.T, canonical.terminal, canonical.d0
+    results = {}
+    for p in p_values:
+        scores = []
+        for _ in range(n_mdps):
+            tmp = random_mdp(S, A, gamma=gamma, k=k, R_type=R_type, R_scale=p,
+                             terminal_states=1,
+                             rng=np.random.default_rng(int(rng.integers(0, 2**31))))
+            mdp = MDP(S=S, A=A, T=T_fixed, R=tmp.R, gamma=gamma,
+                      terminal=term_fixed, d0=d0_fixed.copy())
+            scores.append(agenticity_score(mdp, verbose=False, compute_mi=False,
+                                           rng=np.random.default_rng(int(rng.integers(0, 2**31)))))
+        results[p] = scores
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Group 3a: γ sweep
+# ---------------------------------------------------------------------------
+
+def run_gamma_sweep(
+    gammas: list = None,
+    S: int = 20,
+    A: int = 4,
+    k: int = 3,
+    R_conditions: list = None,
+    n_mdps: int = 50,
+    T_type: str = 'random',
+    T_alpha: float = 0.1,
+    rng_seed: int = 42,
+) -> dict:
+    """
+    Group 3a: for each (R_type, R_scale, gamma) triple, sample n_mdps MDPs and
+    compute agenticity scores.
+    Returns {(R_type, R_scale, gamma): [score dicts]}.
+    """
+    if gammas is None:
+        gammas = [0.5, 0.7, 0.8, 0.9, 0.95, 0.99]
+    if R_conditions is None:
+        R_conditions = [('spike_slab', 0.1), ('gaussian', 1.0)]
+    rng = np.random.default_rng(rng_seed)
+    results = {}
+    for R_type, R_scale in R_conditions:
+        for gamma in gammas:
+            scores = []
+            for _ in range(n_mdps):
+                mdp = random_mdp(S, A, gamma=gamma, k=k,
+                                 R_type=R_type, R_scale=R_scale, terminal_states=1,
+                                 T_type=T_type, T_alpha=T_alpha,
+                                 rng=np.random.default_rng(int(rng.integers(0, 2**31))))
+                scores.append(agenticity_score(mdp, verbose=False, compute_mi=False,
+                                               rng=np.random.default_rng(int(rng.integers(0, 2**31)))))
+            results[(R_type, R_scale, gamma)] = scores
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Group 2: T-sensitivity
+# ---------------------------------------------------------------------------
+
+def run_t_sensitivity(
+    n_R: int = 100,
+    S: int = 20,
+    A: int = 4,
+    gamma: float = 0.95,
+    k: int = 3,
+    R_conditions: list = None,
+    T_types: list = None,
+    T_alpha: float = 0.1,
+    rng_seed: int = 42,
+) -> dict:
+    """
+    Group 2: for each R sample, evaluate agenticity under multiple T structures.
+
+    Fixes n_R reward matrices per (R_type, R_scale) then scores each R under
+    every T_type independently. Index i in each T_type list corresponds to the
+    same R_i, enabling paired scatter plots.
+
+    Returns {(R_type, R_scale): {T_type: [score dicts]}}.
+    """
+    if R_conditions is None:
+        R_conditions = [('gaussian', 1.0), ('spike_slab', 0.05)]
+    if T_types is None:
+        T_types = ['uniform', 'dirichlet', 'deterministic']
+    rng = np.random.default_rng(rng_seed)
+    terminal = set(range(S - 1, S))
+    non_terminal = [s for s in range(S) if s not in terminal]
+    d0 = np.zeros(S)
+    d0[non_terminal] = 1.0 / len(non_terminal)
+
+    results = {}
+    for R_type, R_scale in R_conditions:
+        R_list = []
+        for _ in range(n_R):
+            tmp = random_mdp(S, A, gamma=gamma, k=k,
+                             R_type=R_type, R_scale=R_scale, terminal_states=1,
+                             rng=np.random.default_rng(int(rng.integers(0, 2**31))))
+            R_list.append(tmp.R.copy())
+
+        paired = {T_type: [] for T_type in T_types}
+        for R_mat in R_list:
+            for T_type in T_types:
+                tmp_t = random_mdp(S, A, gamma=gamma, k=k,
+                                   R_type='gaussian', terminal_states=1,
+                                   T_type=T_type, T_alpha=T_alpha,
+                                   rng=np.random.default_rng(int(rng.integers(0, 2**31))))
+                mdp = MDP(S=S, A=A, T=tmp_t.T, R=R_mat, gamma=gamma,
+                          terminal=terminal, d0=d0.copy())
+                paired[T_type].append(
+                    agenticity_score(mdp, verbose=False, compute_mi=False,
+                                     rng=np.random.default_rng(int(rng.integers(0, 2**31))))
+                )
+        results[(R_type, R_scale)] = paired
+    return results
+
+
+# ---------------------------------------------------------------------------
+# Group 3b: S sweep
+# ---------------------------------------------------------------------------
+
+def run_s_sweep(
+    S_values: list = None,
+    A: int = 4,
+    gamma: float = 0.95,
+    k: int = 3,
+    R_type: str = 'gaussian',
+    R_scale: float = 1.0,
+    T_types: list = None,
+    T_alpha: float = 0.1,
+    n_mdps: int = 50,
+    rng_seed: int = 42,
+) -> dict:
+    """
+    Group 3b: sweep S_values × T_types. Returns {(S, T_type): [score dicts]}.
+    """
+    if S_values is None:
+        S_values = [5, 10, 20, 50, 100]
+    if T_types is None:
+        T_types = ['uniform', 'dirichlet', 'deterministic']
+    rng = np.random.default_rng(rng_seed)
+    results = {}
+    for S in S_values:
+        for T_type in T_types:
+            scores = []
+            for _ in range(n_mdps):
+                mdp = random_mdp(S, A, gamma=gamma, k=k,
+                                 R_type=R_type, R_scale=R_scale, terminal_states=1,
+                                 T_type=T_type, T_alpha=T_alpha,
+                                 rng=np.random.default_rng(int(rng.integers(0, 2**31))))
+                scores.append(agenticity_score(mdp, verbose=False, compute_mi=False,
+                                               rng=np.random.default_rng(int(rng.integers(0, 2**31)))))
+            results[(S, T_type)] = scores
+    return results

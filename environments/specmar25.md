@@ -280,4 +280,37 @@ the batch run and flags noisier estimates in the returned metadata.
 | `mce_policy_entropy(mdp, alpha, eps)` | mdp.py | soft_value_iteration |
 | `random_mdp(S, A, gamma, k, R_type, R_scale, terminal_states, rng)` | mdp.py | MDP dataclass |
 | `run_pam_experiment(...)` | mdp.py or new experiments.py | all above |
- 
+
+---
+
+## Implementation Status (updated March 2026)
+
+### Completed
+
+**`random_mdp()` extensions (experiments.py)**
+- `T_type` parameter: `'random'` (Dirichlet(1) over k successors, default), `'uniform'` (1/S to all states), `'dirichlet'` (Dirichlet(T_alpha) over k successors, concentrated at low alpha), `'deterministic'` (each (s,a) → one fixed s')
+- `T_alpha` parameter: concentration for Dirichlet T (default 0.1 = highly concentrated)
+- `R_type='spike_slab'`: mask × N(0,1), where mask ~ Bernoulli(R_scale). R_scale = p = sparsity probability
+
+**New experiment functions (experiments.py)**
+- `run_p_sweep(R_type, p_values, ...)`: Group 1 — fix T, sweep R_scale=p. Returns `{p: [score dicts]}`
+- `run_gamma_sweep(gammas, R_conditions, ...)`: Group 3a — sweep γ per (R_type, R_scale). Returns `{(R_type, R_scale, gamma): [score dicts]}`
+- `run_t_sensitivity(n_R, R_conditions, T_types, ...)`: Group 2 — for each R, score under multiple T structures. Returns `{(R_type, R_scale): {T_type: [score dicts]}}` where index i is the same R_i across T_types
+- `run_s_sweep(S_values, T_types, ...)`: Group 3b — sweep S × T_type. Returns `{(S, T_type): [score dicts]}`
+
+**New plot script: `plot_sampling.py`**
+- Plot 09: Bernoulli p sweep (spike-and-slab-const)
+- Plot 10: spike-and-slab p sweep (mask × N(0,1))
+- Plot 11: γ sweep for spike_slab and gaussian R
+- Plot 12: T-sensitivity scatter (Uniform vs Deterministic T, same R)
+- Plot 13: S sweep per T type
+
+### Not yet implemented
+
+- `R_type='uniform_simplex'`: Dirichlet(1,...,1) over all (s,a,s') triples; needed for Turner comparison. Deferred — structurally distinct from all other R_types.
+- Fraction-agentic estimator with bootstrap CIs (§5.3): deferred until composite weights are calibrated from correlation analysis.
+
+### Open design questions carried forward
+
+- The `'spike_slab'` R_type hardcodes σ=1.0 for non-zero entries. Varying σ independently of p requires a separate parameter.
+- T-sensitivity experiment generates a fresh random T for each (R_i, T_type) evaluation. This tests the distribution of scores per T_type but not the exact same T across types. Acceptable for distribution comparison; use a fixed T seed per R_i if exact pairing is needed.

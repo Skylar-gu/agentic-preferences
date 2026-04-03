@@ -63,7 +63,7 @@ def make_chain_mdp(n: int = 10, gamma: float = 0.95,
     for s in range(S - 1):
         T[s, 0, s] = 1.0
         T[s, 1, s + 1] = 1.0
-    T[S - 1, :, S - 1] = 1.0
+    T[S - 1, :, S - 1] = 1.0 # absorbing terminal
 
     R = np.zeros((S, A, S))
     rng_r = np.random.default_rng(0)

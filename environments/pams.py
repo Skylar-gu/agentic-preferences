@@ -1,5 +1,5 @@
 """
-week3.py — Week 3/4 PAMs + agenticity_score.
+pams.py — Planning Agenticity Measures (PAMs) + agenticity_score.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -7,31 +7,71 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import numpy as np
 from scipy.stats import entropy as scipy_entropy  # noqa: F401 (scipy stubs absent)
 from core import (MDP, value_iteration,
-                  value_under_random_policy, soft_value_iteration)
-from week2 import control_advantage, one_step_recovery, planning_pressure
+                  value_under_random_policy, soft_value_iteration,
+                  finite_horizon_lookahead_policy)
+from w2_metrics import control_advantage, one_step_recovery
 
 
 # ---------------------------------------------------------------------------
-# Week 3 Proxies (shaping-invariant agenticity measures)
+# PAMs (shaping-invariant agenticity measures)
 # ---------------------------------------------------------------------------
 
-def advantage_gap(mdp: MDP, Q: np.ndarray, V: np.ndarray) -> float:
-    """Mean(max_a A* - min_a A*) over non-terminal states. Built on A* = Q* - V*."""
+def advantage_gap(mdp: MDP, Q: np.ndarray, V: np.ndarray,
+                  V_rand: np.ndarray = None) -> float:
+    """
+    Mean(max_a A* - min_a A*) over non-terminal states, normalised by
+    range(V* - V^rand).
+
+    Dividing by range(V* - V^rand) removes reward-scale dependence while
+    preserving shaping invariance: A*(s,a) is already shaping-invariant
+    (Phi cancels in Q - V), and range(V* - V^rand) is shaping-invariant
+    because Phi cancels in the difference before the range is taken.
+
+    Returns a value in [0, inf) when V_rand is None (raw, unscaled),
+    or in [0, ~1] when V_rand is provided. Values > 1 are possible if
+    the mean gap exceeds the value-function spread, but rare in practice.
+
+    If range(V* - V^rand) < 1e-10 (e.g. potential rewards where V* = V^rand),
+    returns 0.0.
+    """
     A_star = Q - V[:, None]
     non_terminal = [s for s in range(mdp.S) if s not in mdp.terminal]
     if not non_terminal:
         return float('nan')
     A_nt = A_star[non_terminal]
-    return float(np.mean(A_nt.max(axis=1) - A_nt.min(axis=1)))
+    raw = float(np.mean(A_nt.max(axis=1) - A_nt.min(axis=1)))
+    if V_rand is None:
+        return raw
+    delta = V[non_terminal] - V_rand[non_terminal]
+    r = float(delta.max() - delta.min())
+    if r < 1e-10:
+        return 0.0
+    return raw / r
 
 
-def vstar_variance_corrected(mdp: MDP, V_star: np.ndarray,
-                              V_rand: np.ndarray) -> float:
-    """Var(V* - V^rand) over non-terminal states. Phi cancels in the difference."""
+def vstar_variance(mdp: MDP, V_star: np.ndarray,
+                   V_rand: np.ndarray) -> float:
+    """
+    Var of min-max normalised (V* - V^rand) over non-terminal states.
+
+    The raw difference V* - V^rand is divided by its own range before computing
+    variance, making the metric scale-invariant: a reward that spreads state
+    values by 0.01 and one that spreads them by 100 score identically if the
+    relative structure is the same.  Shaping-invariance is preserved because
+    the Phi offset cancels in V* - V^rand before normalisation.
+
+    Returns a value in [0, 0.25]:
+      0    — all states have identical advantage (uniform value landscape)
+      0.25 — bimodal split, half states at min, half at max (maximum spread)
+    """
     non_terminal = [s for s in range(mdp.S) if s not in mdp.terminal]
     if not non_terminal:
         return float('nan')
-    return float(np.var(V_star[non_terminal] - V_rand[non_terminal]))
+    delta = V_star[non_terminal] - V_rand[non_terminal]
+    vrange = delta.max() - delta.min()
+    if vrange < 1e-10:
+        return 0.0
+    return float(np.var((delta - delta.min()) / vrange))
 
 
 def early_action_mi(mdp: MDP, pi: np.ndarray,
@@ -165,54 +205,67 @@ def advantage_sparsity(mdp: MDP, Q: np.ndarray, V: np.ndarray,
     return float((np.abs(A_star[non_terminal]) < threshold).mean())
 
 
-# ---------------------------------------------------------------------------
-# New PAMs (Week 4)
-# ---------------------------------------------------------------------------
-
-def effective_time_horizon(
+def effective_planning_horizon(
     mdp: MDP,
-    pi: np.ndarray,
-    horizon: int = 200,
-    n_episodes: int = 1000,
-    rng: np.random.Generator = None,
-) -> float:
+    eps: float = 0.05,
+    max_k: int = None,
+) -> dict:
     """
-    Reward-weighted centre-of-mass across timesteps under pi from d0.
+    H_eps = min{k : (J(pi*) - J(pi^k)) / (J(pi*) - J(pi^0)) <= eps}
 
-    H_eff = sum_t (t * mass[t]) / sum_t mass[t]
+    pi^k acts optimally for k steps then uniformly at random:
+      J(pi^k) = d0 @ V_k
+    where V_k is the value from k-step backward induction bootstrapped
+    with V^rand (the uniform-random policy value function). pi^0 is the
+    uniform random policy, so J(pi^0) = d0 @ V^rand.
 
-    mass[t] = sum over episodes of gamma^t * |r_t| at step t.
-    Discounting is baked in so the measure respects the agent's time preference.
+    Shaping-invariant: potential shaping adds gamma*Phi(s') - Phi(s) at
+    every step. V* - V^rand differences cancel Phi offsets because both
+    value functions are shifted by the same linear Phi term.
 
-    NOT shaping-invariant: potential shaping F = gamma*Phi(s') - Phi(s)
-    adds a nonzero term at every step, spreading reward mass across all
-    timesteps and shifting H_eff.
+    max_k: if None, auto-computed as ceil(log(eps) / log(gamma)) + 10,
+    which is the minimum number of steps required for the lookahead to
+    theoretically converge to within eps. Capped at 300.
 
-    Returns 0.0 if total reward mass < 1e-10 (zero-reward MDP).
+    Returns:
+      H_eps:   effective planning horizon (int; max_k if never converged)
+      max_k:   ceiling used (auto or supplied)
+      ratios:  gap ratio at each k in [0, max_k] (list of floats)
+      gap:     J(pi*) - J(pi^0), the denominator
+      eps:     threshold used
     """
-    if rng is None:
-        rng = np.random.default_rng(42)
+    if max_k is None:
+        if mdp.gamma < 1.0 - 1e-9:
+            max_k = min(int(np.ceil(np.log(eps) / np.log(mdp.gamma))) + 10, 300)
+        else:
+            max_k = 300
 
-    mass = np.zeros(horizon)
+    V_star, _, _ = value_iteration(mdp)
+    V_rand = value_under_random_policy(mdp)
 
-    for _ in range(n_episodes):
-        s = rng.choice(mdp.S, p=mdp.d0)
-        discount = 1.0
-        for t in range(horizon):
-            if s in mdp.terminal:
-                break
-            a = int(pi[s])
-            s_next = rng.choice(mdp.S, p=mdp.T[s, a, :])
-            r = mdp.R[s, a, s_next]
-            mass[t] += discount * abs(r)
-            discount *= mdp.gamma
-            s = s_next
+    J_star = float(mdp.d0 @ V_star)
+    J_rand = float(mdp.d0 @ V_rand)
+    gap = J_star - J_rand
 
-    total = mass.sum()
-    if total < 1e-10:
-        return 0.0
-    t_idx = np.arange(horizon, dtype=float)
-    return float(np.dot(t_idx, mass) / total)
+    # Raise guard to 1e-6: potential rewards leave numerical residuals of ~1e-9
+    # in J*-J^rand which would otherwise cause spurious max_k returns.
+    if abs(gap) < 1e-6:
+        return {'H_eps': 0, 'max_k': max_k, 'ratios': [0.0], 'gap': round(gap, 6), 'eps': eps}
+
+    ratios = []
+    for k in range(max_k + 1):
+        if k == 0:
+            V_k = V_rand
+        else:
+            V_k, _ = finite_horizon_lookahead_policy(mdp, k, V_rand)
+
+        ratio = (J_star - float(mdp.d0 @ V_k)) / gap
+        ratios.append(round(float(ratio), 6))
+
+        if ratio <= eps:
+            return {'H_eps': k, 'max_k': max_k, 'ratios': ratios, 'gap': round(gap, 6), 'eps': eps}
+
+    return {'H_eps': max_k, 'max_k': max_k, 'ratios': ratios, 'gap': round(gap, 6), 'eps': eps}
 
 
 def mce_policy_entropy(
@@ -265,7 +318,6 @@ def agenticity_score(mdp: MDP, weights: dict = None,
                      verbose: bool = True,
                      rng: np.random.Generator = None,
                      compute_mi: bool = True,
-                     pp_horizon: int = 3,
                      w2_scales: dict = None) -> dict:
     """
     Composite agenticity (all shaping-invariant).
@@ -278,10 +330,7 @@ def agenticity_score(mdp: MDP, weights: dict = None,
       adv_gap=0.20, vstar_var=0.30, mi_diff=0.25, ctrl_adv=0.15, one_step=0.10.
     Scales dict keys: 'ctrl_adv', 'one_step' (95th-pct values from Q1 are
     a good choice; pass the 'w2_empirical_scales' entry from run_pam_experiment).
-    planning_pressure is excluded from the composite (always near 0).
-
     compute_mi:  if False, skip early_action_mi and renormalise composite.
-    pp_horizon:  lookahead depth h for planning_pressure (default 3).
     """
     if weights is None:
         if w2_scales is not None:
@@ -298,14 +347,13 @@ def agenticity_score(mdp: MDP, weights: dict = None,
     # Uniform random policy as baseline for Week 2 metrics
     pi_rand = np.ones((mdp.S, mdp.A)) / mdp.A
 
-    # Week 2 metrics
+    # W2 metrics
     ctrl_adv  = control_advantage(mdp, pi_rand)
     one_step  = one_step_recovery(mdp, pi_rand)
-    plan_pres = planning_pressure(mdp, h=pp_horizon)
 
-    # Week 3 proxies
-    ag  = advantage_gap(mdp, Q_star, V_star)
-    vv  = vstar_variance_corrected(mdp, V_star, V_rand)
+    # PAMs
+    ag  = advantage_gap(mdp, Q_star, V_star, V_rand)
+    vv  = vstar_variance(mdp, V_star, V_rand)
     asp = advantage_sparsity(mdp, Q_star, V_star)
 
     if compute_mi:
@@ -314,12 +362,13 @@ def agenticity_score(mdp: MDP, weights: dict = None,
     else:
         mi = {'mi_early': None, 'mi_late': None, 'mi_diff': None}
 
-    h_eff   = effective_time_horizon(mdp, pi_star, horizon=horizon,
-                                     n_episodes=n_episodes, rng=rng)
+    h_eff   = effective_planning_horizon(mdp)
     mce_ent = mce_policy_entropy(mdp, alpha=1.0)
 
-    ag_norm = float(1 - np.exp(-ag * 1.0))
-    vv_norm = float(1 - np.exp(-vv / 2.0))
+    # ag is now range-normalised by range(V*-V^rand); clip to [0,1]
+    ag_norm = float(np.clip(ag, 0.0, 1.0))
+    # vv is now in [0, 0.25] (range-normalised variance); multiply by 4 → [0, 1]
+    vv_norm = float(np.clip(4.0 * vv, 0.0, 1.0))
     mi_norm = float(np.clip((mi['mi_diff'] + 1) / 2, 0, 1)) if compute_mi else None
 
     # W2 normalisation (only when scales are provided)
@@ -346,7 +395,7 @@ def agenticity_score(mdp: MDP, weights: dict = None,
                         for k, v in components.items()) / w_total
 
     result = {
-        # Week 3 proxies (in composite)
+        # PAMs (in composite)
         'adv_gap': round(ag, 4),
         'adv_gap_norm': round(ag_norm, 4),
         'vstar_var_raw': round(vv, 4),
@@ -357,17 +406,19 @@ def agenticity_score(mdp: MDP, weights: dict = None,
         'mi_diff_norm': round(mi_norm, 4) if mi_norm is not None else None,
         'adv_sparsity': round(asp, 4),
         'composite': round(composite, 4),
-        # Week 4 PAMs (diagnostic, not in composite)
-        'h_eff_raw': round(h_eff, 4),
-        'h_eff_norm': round(1 - np.exp(-h_eff / 10.0), 4),
+        # Diagnostic PAMs (not in composite)
+        'H_eps': h_eff['H_eps'],
+        'H_eps_norm': round(h_eff['H_eps'] / h_eff['max_k'], 4),
+        'H_eps_max_k': h_eff['max_k'],
+        'H_eps_gap': h_eff['gap'],
+        'H_eps_ratios': h_eff['ratios'],
         'mce_entropy_raw': round(mce_ent['entropy_raw'], 4),
         'mce_entropy_norm': round(mce_ent['entropy_norm'], 4),
-        # Week 2 metrics
+        # W2 metrics
         'ctrl_adv': round(ctrl_adv, 4),
         'ctrl_adv_norm': round(ctrl_adv_norm, 4) if ctrl_adv_norm is not None else None,
         'one_step_recovery': round(one_step, 4),
         'one_step_norm': round(one_step_norm, 4) if one_step_norm is not None else None,
-        'planning_pressure': round(plan_pres, 4),
     }
 
     if verbose:
@@ -376,14 +427,13 @@ def agenticity_score(mdp: MDP, weights: dict = None,
         os_str = (f" / norm={one_step_norm:.4f}"  if in_comp else " (diag)")
         print(f"  [W2] Control advantage:                 {ctrl_adv:.4f}{ca_str}")
         print(f"  [W2] One-step recovery:                 {one_step:.4f}{os_str}")
-        print(f"  [W2] Planning pressure (h={pp_horizon}):          {plan_pres:.4f} (diag)")
         print(f"  Advantage gap (raw / norm):             {ag:.4f} / {ag_norm:.4f}")
-        print(f"  V*-V^rand variance (raw / norm):        {vv:.4f} / {vv_norm:.4f}")
+        print(f"  V*-V^rand variance (raw / norm):        {vv:.4f} / {vv_norm:.4f}  [range-norm, ×4→[0,1]]")
         if compute_mi:
             print(f"  MI|s0 (early / late / diff):            {mi['mi_early']:.4f} / {mi['mi_late']:.4f} / {mi['mi_diff']:+.4f}")
         else:
             print(f"  MI|s0:                                  (skipped)")
-        print(f"  Effective time horizon (raw / norm):    {h_eff:.4f} / {result['h_eff_norm']:.4f}")
+        print(f"  Effective planning horizon H_eps:       {h_eff['H_eps']}/{h_eff['max_k']} = {result['H_eps_norm']:.4f}  (gap={h_eff['gap']:.4f})")
         print(f"  MCE entropy (raw / norm):               {mce_ent['entropy_raw']:.4f} / {mce_ent['entropy_norm']:.4f}")
         print(f"  Advantage sparsity (diagnostic):        {asp:.4f}")
         print(f"  ── COMPOSITE: {composite:.4f}")

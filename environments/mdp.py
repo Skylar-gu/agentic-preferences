@@ -5,11 +5,11 @@ Import everything from submodules; run as `python environments/mdp.py` for demo.
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from core import *        # noqa: F401,F403
-from week2 import *       # noqa: F401,F403
-from week3 import *       # noqa: F401,F403
-from envs import *        # noqa: F401,F403
-from experiments import * # noqa: F401,F403
+from core import *         # noqa: F401,F403
+from w2_metrics import *   # noqa: F401,F403
+from pams import *         # noqa: F401,F403
+from envs import *         # noqa: F401,F403
+from runners import *      # noqa: F401,F403
 
 if __name__ == '__main__':
     import numpy as np
@@ -26,19 +26,15 @@ if __name__ == '__main__':
 
     Actrl = control_advantage(gw, pi0)
     R1 = one_step_recovery(gw, pi0)
-    Ph = planning_pressure(gw, h=3)
     print(f"  A_ctrl = {Actrl:.6f}")
     print(f"  R1     = {R1:.6f}")
-    print(f"  P_h(3) = {Ph:.6f}")
 
     Phi = np.random.default_rng(0).normal(size=gw.S)
     gw2 = add_potential_shaping(gw, Phi)
     Actrl2 = control_advantage(gw2, pi0)
     R1_2 = one_step_recovery(gw2, pi0)
-    Ph2 = planning_pressure(gw2, h=3)
     print(f"  Δ A_ctrl = {Actrl2 - Actrl:.2e}  (should be ~0)")
     print(f"  Δ R1     = {R1_2 - R1:.2e}  (should be ~0)")
-    print(f"  Δ P_h    = {Ph2 - Ph:.2e}  (should be ~0)")
 
     # --- Week 3: agenticity proxies ---
     print("\n" + "=" * 70)
