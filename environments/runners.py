@@ -5,9 +5,36 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
+from concurrent.futures import ProcessPoolExecutor
 from core import MDP
 from pams import agenticity_score
 from envs import make_chain_mdp, make_grid_mdp
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+PAM_NAMES = ['adv_gap', 'vstar_var', 'mi_diff', 'h_eff', 'mce_entropy']
+
+# ---------------------------------------------------------------------------
+# Parallelization Helper
+# ---------------------------------------------------------------------------
+
+def _worker_score(args):
+    """
+    Worker function: now receives raw data instead of an MDP object
+    to avoid pickling issues on Windows.
+    """
+    # Unpack raw data
+    # args = (S, A, T, R, gamma, terminal, d0, include_mi, seed)
+    S, A, T, R, gamma, terminal, d0, include_mi, seed = args
+    
+    # Reconstruct MDP object locally inside the worker process
+    from core import MDP
+    mdp = MDP(S=S, A=A, T=T, R=R, gamma=gamma, terminal=terminal, d0=d0)
+    
+    rng = np.random.default_rng(seed)
+    from pams import agenticity_score
+    return agenticity_score(mdp, verbose=False, compute_mi=include_mi, rng=rng)
 
 
 # ---------------------------------------------------------------------------
@@ -34,7 +61,7 @@ def random_mdp(
                      assign Dirichlet(1,...,1) weights. (default)
       'uniform':     T[s,a,s'] = 1/S for all s' (fully mixing).
       'dirichlet':   like 'random' but uses Dirichlet(T_alpha,...,T_alpha) weights.
-                     Low T_alpha (e.g. 0.1) → highly concentrated / near-deterministic.
+                     Low T_alpha (e.g. 0.1), highly concentrated / near-deterministic.
       'deterministic': each (s,a) transitions to a single randomly chosen successor.
 
     T_alpha: concentration parameter for 'dirichlet' T_type (default 0.1).
@@ -172,7 +199,6 @@ def norm_w2(ctrl_adv, one_step, scales):
 # ---------------------------------------------------------------------------
 # Batch PAM Experiment (Q1/Q2/Q3)
 # ---------------------------------------------------------------------------
-
 def run_pam_experiment(
     n_random_mdps: int = 200,
     S_values: list = None,
@@ -211,215 +237,133 @@ def run_pam_experiment(
                   'grid'  = 2D grid with 4-directional actions
     include_mi: if True, compute early_action_mi (slow, n_episodes reduced to 300).
     """
-    if S_values is None:
-        S_values = [5, 10, 20]
-    if R_types is None:
-        R_types = ['gaussian', 'uniform', 'bernoulli', 'potential', 'goal']
-    if R_scales is None:
-        R_scales = {'bernoulli': 0.5}
-    if T_structures is None:
-        T_structures = ['random']
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+    import os
+
+    if S_values is None: S_values = [5, 10, 20]
+    if R_types is None: R_types = ['gaussian', 'uniform', 'bernoulli', 'potential', 'goal']
+    if R_scales is None: R_scales = {'bernoulli': 0.5}
+    if T_structures is None: T_structures = ['random']
 
     rng = np.random.default_rng(rng_seed)
-    PAM_NAMES = ['adv_gap', 'vstar_var', 'mi_diff', 'h_eff', 'mce_entropy']
-
-    def _score_mdp(mdp, n_ep=500):
-        return agenticity_score(
-            mdp, verbose=False, rng=rng,
-            compute_mi=include_mi,
-            n_episodes=(300 if include_mi else n_ep),
-        )
-
+    
     def _pam_vector_norm(r):
-        return np.array([
-            r['adv_gap_norm'],
-            r['vstar_var_norm'],
-            r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
-            r['H_eps_norm'],
-            r['mce_entropy_norm'],
-        ])
+        return np.array([r['adv_gap_norm'], r['vstar_var_norm'], 
+                         r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
+                         r['H_eps_norm'], r['mce_entropy_norm']])
 
     def _pam_vector_raw(r):
-        return np.array([
-            r['adv_gap'],
-            r['vstar_var_raw'],
-            r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
-            r['H_eps'],
-            r['mce_entropy_raw'],
-            r['ctrl_adv'],
-            r['one_step_recovery'],
-        ])
+        return np.array([r['adv_gap'], r['vstar_var_raw'], 
+                         r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
+                         r['H_eps'], r['mce_entropy_raw'], r['ctrl_adv'], r['one_step_recovery']])
 
-    def _r_scale_for(R_type):
-        return R_scales.get(R_type, 1.0)
+    def _r_scale_for(R_type): return R_scales.get(R_type, 1.0)
 
     def _make_structured_T(S, structure, terminal, local_rng):
-        """Build a topology-specific transition matrix."""
+        # (Keep your original implementation of _make_structured_T here)
         non_term = [s for s in range(S) if s not in terminal]
         T = np.zeros((S, A, S))
-
-        # 'dirichlet_{alpha}' — Dirichlet(alpha,...,alpha) weights over k successors.
-        # 'random' is an alias for 'dirichlet_1.0'.
         if structure == 'random' or structure.startswith('dirichlet_'):
-            alpha = 1.0
-            if structure.startswith('dirichlet_'):
-                alpha = float(structure.split('_', 1)[1])
+            alpha = 1.0 if structure == 'random' else float(structure.split('_', 1)[1])
             for s in range(S):
                 for a in range(A):
-                    if s in terminal:
-                        T[s, a, s] = 1.0
-                        continue
+                    if s in terminal: T[s, a, s] = 1.0; continue
                     pool = non_term if non_term else list(range(S))
                     k_eff = min(k, len(pool))
                     succ = local_rng.choice(pool, size=k_eff, replace=False)
                     T[s, a, succ] = local_rng.dirichlet(np.full(k_eff, alpha))
-
         elif structure == 'chain':
-            # A0=advance, A1=retreat, A2=stay, A3=noisy-advance
-            max_nt = max(non_term) if non_term else S - 1
+            max_nt = max(non_term) if non_term else S-1
             min_nt = min(non_term) if non_term else 0
             for s in range(S):
-                if s in terminal:
-                    T[s, :, s] = 1.0
-                    continue
-                s_fwd  = min(s + 1, max_nt) if (s + 1) not in terminal else s
+                if s in terminal: T[s, :, s] = 1.0; continue
+                s_fwd = min(s + 1, max_nt) if (s + 1) not in terminal else s
                 s_back = max(s - 1, min_nt) if (s - 1) not in terminal else s
-                T[s, 0, s_fwd]  = 1.0   # advance
-                T[s, 1, s_back] = 1.0   # retreat
-                T[s, 2, s]      = 1.0   # stay
-                # noisy advance: if at boundary s_fwd==s, just stay
-                if s_fwd != s:
-                    T[s, 3, s_fwd] = 0.7
-                    T[s, 3, s]     = 0.3
-                else:
-                    T[s, 3, s] = 1.0
-
+                T[s, 0, s_fwd] = 1.0; T[s, 1, s_back] = 1.0; T[s, 2, s] = 1.0
+                T[s, 3, s_fwd] = 0.7; T[s, 3, s] = 0.3 if s_fwd != s else 1.0
         elif structure == 'grid':
             rows = max(2, int(np.round(np.sqrt(S - len(terminal)))))
             cols = max(2, (S - len(terminal) + rows - 1) // rows)
-            deltas = [(-1, 0), (1, 0), (0, -1), (0, 1)]  # up/down/left/right
+            deltas = [(-1, 0), (1, 0), (0, -1), (0, 1)]
             for s in non_term:
                 r_s, c_s = s // cols, s % cols
                 for a, (dr, dc) in enumerate(deltas[:A]):
-                    nr = max(0, min(rows - 1, r_s + dr))
-                    nc = max(0, min(cols - 1, c_s + dc))
+                    nr, nc = max(0, min(rows-1, r_s+dr)), max(0, min(cols-1, c_s+dc))
                     s_next = nr * cols + nc
-                    if s_next >= S or s_next in terminal:
-                        s_next = s  # boundary: stay
+                    if s_next >= S or s_next in terminal: s_next = s
                     T[s, a, s_next] += 1.0
-            for s in terminal:
-                T[s, :, s] = 1.0
-        else:
-            raise ValueError(f"Unknown T_structure: {structure!r}. "
-                             "Choose 'random', 'dirichlet_{{alpha}}', 'chain', or 'grid'.")
+            for s in terminal: T[s, :, s] = 1.0
         return T
 
-    # ------------------------------------------------------------------
-    # Q1 — fix T, vary R
-    # ------------------------------------------------------------------
-    q1 = {}
-    q1_raw = {}
-    for S in S_values:
-        for R_type in R_types:
-            if verbose:
-                print(f"Q1: S={S}, R_type={R_type}")
-
-            canonical = random_mdp(S, A, gamma=gamma, k=k,
-                                   R_type='gaussian', terminal_states=1,
-                                   rng=np.random.default_rng(0))
-            T_fixed = canonical.T
-            terminal_fixed = canonical.terminal
-            d0_fixed = canonical.d0
-
-            pam_norm = []
-            pam_raw  = []
-            for _ in range(n_random_mdps):
-                tmp_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
-                tmp = random_mdp(S, A, gamma=gamma, k=k,
-                                 R_type=R_type,
-                                 R_scale=_r_scale_for(R_type),
-                                 terminal_states=1,
-                                 rng=tmp_rng)
-                tmp_mdp = MDP(S=S, A=A, T=T_fixed, R=tmp.R,
-                              gamma=gamma, terminal=terminal_fixed,
-                              d0=d0_fixed.copy())
-                r = _score_mdp(tmp_mdp)
-                pam_norm.append(_pam_vector_norm(r))
-                pam_raw.append(_pam_vector_raw(r))
-
-            q1[(S, R_type)]     = np.array(pam_norm)
-            q1_raw[(S, R_type)] = np.array(pam_raw)
+    max_workers = max(1, os.cpu_count() - 1)
 
     # ------------------------------------------------------------------
-    # Compute empirical 95th-percentile W2 scales from Q1 raw data
+    # Q1 (Fixed Parallelization)
     # ------------------------------------------------------------------
+    q1, q1_raw = {}, {}
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for S in S_values:
+            for R_type in R_types:
+                if verbose: print(f"Q1: S={S}, R_type={R_type}...", flush=True)
+                canonical = random_mdp(S, A, gamma=gamma, k=k, R_type='gaussian', terminal_states=1, rng=np.random.default_rng(0))
+                T_fixed, term_fixed, d0_fixed = canonical.T, canonical.terminal, canonical.d0
+
+                futures = []
+                for _ in range(n_random_mdps):
+                    tmp_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
+                    tmp = random_mdp(S, A, gamma=gamma, k=k, R_type=R_type, R_scale=_r_scale_for(R_type), terminal_states=1, rng=tmp_rng)
+                    # PASS RAW DATA ONLY
+                    args = (S, A, T_fixed, tmp.R, gamma, term_fixed, d0_fixed, include_mi, int(rng.integers(0, 2**31)))
+                    futures.append(executor.submit(_worker_score, args))
+                
+                results_list = [f.result() for f in as_completed(futures)]
+                q1[(S, R_type)] = np.array([_pam_vector_norm(r) for r in results_list])
+                q1_raw[(S, R_type)] = np.array([_pam_vector_raw(r) for r in results_list])
+
     def _compute_w2_scales(q1_raw_dict, percentile=95):
-        pools = [[], []]  # ctrl_adv, one_step
+        pools = [[], []]
         for mat in q1_raw_dict.values():
-            for i in range(5, 7):
-                col = mat[:, i]
-                pools[i-5].extend(col[~np.isnan(col)].tolist())
-        keys = ['ctrl_adv', 'one_step']
-        return {k: float(np.percentile(v, percentile)) if v else 1.0
-                for k, v in zip(keys, pools)}
-
+            for i in range(5, 7): pools[i-5].extend(mat[:, i][~np.isnan(mat[:, i])].tolist())
+        return {k: float(np.percentile(v, percentile)) if v else 1.0 for k, v in zip(['ctrl_adv', 'one_step'], pools)}
     w2_scales = _compute_w2_scales(q1_raw)
 
     # ------------------------------------------------------------------
-    # Q2 — variance decomposition: T vs R, across T_structures
+    # Q2 (Fixed Parallelization)
     # ------------------------------------------------------------------
     q2 = {}
     n_R = 50
-    for structure in T_structures:
-        for S in S_values:
-            for R_type in R_types:
-                if verbose:
-                    print(f"Q2: structure={structure}, S={S}, R_type={R_type}")
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        for structure in T_structures:
+            for S in S_values:
+                for R_type in R_types:
+                    if verbose: print(f"Q2: structure={structure}, S={S}, R_type={R_type}...", flush=True)
+                    terminal_q2 = {S-1}; non_term_q2 = list(range(S-1))
+                    d0_q2 = np.zeros(S); d0_q2[non_term_q2] = 1.0 / len(non_term_q2)
 
-                terminal_q2 = set(range(S - 1, S))
-                non_term_q2 = [s for s in range(S) if s not in terminal_q2]
-                d0_q2 = np.zeros(S)
-                d0_q2[non_term_q2] = 1.0 / len(non_term_q2)
-
-                group_means = []
-                group_composites_all = []
-
-                for _ in range(n_fixed_T):
-                    t_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
-                    T_t = _make_structured_T(S, structure, terminal_q2, t_rng)
-
-                    composites = []
-                    for _ in range(n_R):
-                        r_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
-                        tmp = random_mdp(S, A, gamma=gamma, k=k,
-                                         R_type=R_type,
-                                         R_scale=_r_scale_for(R_type),
-                                         terminal_states=1,
-                                         rng=r_rng)
-                        mdp_t = MDP(S=S, A=A, T=T_t, R=tmp.R,
-                                    gamma=gamma, terminal=terminal_q2,
-                                    d0=d0_q2.copy())
-                        r = _score_mdp(mdp_t)
-                        composites.append(r['composite'])
-
-                    composites = np.array(composites)
-                    group_means.append(composites.mean())
-                    group_composites_all.append(composites)
-
-                group_means = np.array(group_means)
-                within_var  = float(np.mean([np.var(c) for c in group_composites_all]))
-                between_var = float(np.var(group_means))
-                total_var   = within_var + between_var
-                ratio = between_var / total_var if total_var > 1e-12 else float('nan')
-
-                q2[(structure, S, R_type)] = {
-                    'within_var':  within_var,
-                    'between_var': between_var,
-                    'ratio':       ratio,
-                }
+                    group_means, group_composites_all = [], []
+                    for _ in range(n_fixed_T):
+                        t_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
+                        T_t = _make_structured_T(S, structure, terminal_q2, t_rng)
+                        futures = []
+                        for _ in range(n_R):
+                            r_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
+                            tmp = random_mdp(S, A, gamma=gamma, k=k, R_type=R_type, R_scale=_r_scale_for(R_type), terminal_states=1, rng=r_rng)
+                            # PASS RAW DATA ONLY
+                            args = (S, A, T_t, tmp.R, gamma, terminal_q2, d0_q2, include_mi, int(rng.integers(0, 2**31)))
+                            futures.append(executor.submit(_worker_score, args))
+                        res_R = [f.result() for f in as_completed(futures)]
+                        composites = np.array([r['composite'] for r in res_R])
+                        group_means.append(composites.mean())
+                        group_composites_all.append(composites)
+                    
+                    group_means = np.array(group_means)
+                    within_var = float(np.mean([np.var(c) for c in group_composites_all]))
+                    between_var = float(np.var(group_means))
+                    total_var = within_var + between_var
+                    q2[(structure, S, R_type)] = {'within_var': within_var, 'between_var': between_var, 'ratio': between_var/total_var if total_var > 1e-12 else float('nan')}
 
     # ------------------------------------------------------------------
-    # Q3 — human-made MDPs
+    # Q3 (Fixed Parallelization)
     # ------------------------------------------------------------------
     human_cases = [
         ("Chain-Terminal",  make_chain_mdp(10, reward_type='terminal')),
@@ -430,35 +374,26 @@ def run_pam_experiment(
         ("Grid-Local",      make_grid_mdp(5, 5, reward_type='local')),
         ("Grid-Cliff",      make_grid_mdp(5, 5, reward_type='cliff')),
     ]
-
     q3 = {}
-    for name, mdp in human_cases:
-        if verbose:
-            print(f"  scoring {name}...")
-        r = _score_mdp(mdp)
-        q3[name] = {**r, **norm_w2(r['ctrl_adv'], r['one_step_recovery'],
-                                    w2_scales),
-                    'n_actions': mdp.A}
+    with ProcessPoolExecutor(max_workers=max_workers) as executor:
+        future_to_name = {}
+        for name, mdp in human_cases:
+            # PASS RAW DATA ONLY
+            args = (mdp.S, mdp.A, mdp.T, mdp.R, mdp.gamma, mdp.terminal, mdp.d0, include_mi, int(rng.integers(0, 2**31)))
+            future_to_name[executor.submit(_worker_score, args)] = (name, mdp.A)
+        
+        for future in as_completed(future_to_name):
+            name, n_act = future_to_name[future]
+            r = future.result()
+            q3[name] = {**r, **norm_w2(r['ctrl_adv'], r['one_step_recovery'], w2_scales), 'n_actions': n_act}
 
-    meta = {
-        'S_values': S_values,
-        'n_random_mdps': n_random_mdps,
-        'PAM_names': PAM_NAMES,
-        'include_mi': include_mi,
-        'rng_seed': rng_seed,
-        'noisy_mi_estimates': include_mi,
-        'R_scales': R_scales,
-        'T_structures': T_structures,
-        'w2_empirical_scales': w2_scales,
-    }
+    meta = {'S_values': S_values, 'n_random_mdps': n_random_mdps, 'PAM_names': PAM_NAMES, 
+            'include_mi': include_mi, 'rng_seed': rng_seed, 'R_scales': R_scales, 
+            'T_structures': T_structures, 'w2_empirical_scales': w2_scales}
 
     results = {'q1': q1, 'q1_raw': q1_raw, 'q2': q2, 'q3': q3, 'meta': meta}
-
-    if verbose:
-        _print_pam_results(results)
-
+    if verbose: _print_pam_results(results)
     return results
-
 
 def _print_pam_results(results: dict) -> None:
     """Pretty-print Q1/Q2/Q3 results from run_pam_experiment."""
@@ -500,13 +435,11 @@ def _print_pam_results(results: dict) -> None:
         print(f"  {'norm std':18s}" + "".join(_fmt(v, W) for v in norm_stds))
         if raw_mat is not None:
             raw_means, raw_stds = _col_stats(raw_mat)
-            # Show all 8 raw columns
             hdr_raw = f"  {'':18s}" + "".join(f"{n:>{W}s}" for n in PAM_COLS_RAW)
             print(hdr_raw)
             print(f"  {'raw mean':18s}" + "".join(_fmt(v, W) for v in raw_means))
             print(f"  {'raw std':18s}" + "".join(_fmt(v, W) for v in raw_stds))
 
-        # Pearson correlation on norm matrix (skip all-NaN / zero-variance cols)
         valid_cols = [i for i in range(mat.shape[1])
                       if not np.isnan(norm_stds[i]) and norm_stds[i] > 1e-10]
         if len(valid_cols) >= 2:
@@ -521,7 +454,7 @@ def _print_pam_results(results: dict) -> None:
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
     print("Q2 — T vs R VARIANCE DECOMPOSITION")
-    print("  ratio = between_T_var / total_var  (>0.5 → T dominates)")
+    print("  ratio = between_T_var / total_var  (>0.5, T dominates)")
     print("=" * 70)
     print(f"  {'T_struct':<10s} {'S':<5s} {'R_type':<12s} "
           f"{'within_var':>11s} {'between_var':>12s} {'ratio':>7s}  verdict")
@@ -534,14 +467,14 @@ def _print_pam_results(results: dict) -> None:
               f"{v['within_var']:>11.5f} {v['between_var']:>12.5f} {ratio_str}  {verdict}")
 
     # ------------------------------------------------------------------
-    # Q3 — human-made MDPs  (note |A| confound for MCE entropy)
+    # Q3 — human-made MDPs
     # ------------------------------------------------------------------
     print("\n" + "=" * 70)
     print("Q3 — HUMAN-MADE MDPs")
     print("  Note: chains have A=2, grids have A=4. MCE entropy is H/log(A),")
     print("  so grids mechanically score higher — control for |A| before comparing.")
     print("=" * 70)
-    score_cols = ['composite', 'adv_gap_norm', 'vstar_var_norm', 'h_eff_norm', 'mce_entropy_norm',
+    score_cols = ['composite', 'adv_gap_norm', 'vstar_var_norm', 'H_eps_norm', 'mce_entropy_norm',
                   'ctrl_adv_norm', 'one_step_norm']
     hdrs3 = ['comp', 'adv_gap', 'v*var', 'h_eff', 'mce_ent', 'ctrl_adv', 'one_step']
     print(f"  {'MDP':<22s} {'|A|':>4s}" + "".join(f"{h:>9s}" for h in hdrs3))
@@ -553,179 +486,3 @@ def _print_pam_results(results: dict) -> None:
         print(f"  {name:<22s} {a_str}{vals}")
 
     print(f"\n  MI column: {'included' if results['meta']['include_mi'] else 'excluded (compute_mi=False)'}.")
-
-
-# ---------------------------------------------------------------------------
-# Group 1: p-sweep helper (bernoulli and spike_slab)
-# ---------------------------------------------------------------------------
-
-def run_p_sweep(
-    R_type: str,
-    p_values: list,
-    S: int = 10,
-    A: int = 4,
-    gamma: float = 0.95,
-    k: int = 3,
-    n_mdps: int = 50,
-    rng_seed: int = 42,
-) -> dict:
-    """
-    Group 1: fix one canonical T, sweep R_scale=p for R_type in p_values.
-    Returns {p: [agenticity_score dicts]}.
-    """
-    rng = np.random.default_rng(rng_seed)
-    canonical = random_mdp(S, A, gamma=gamma, k=k, R_type='gaussian',
-                           terminal_states=1, rng=np.random.default_rng(0))
-    T_fixed, term_fixed, d0_fixed = canonical.T, canonical.terminal, canonical.d0
-    results = {}
-    for p in p_values:
-        scores = []
-        for _ in range(n_mdps):
-            tmp = random_mdp(S, A, gamma=gamma, k=k, R_type=R_type, R_scale=p,
-                             terminal_states=1,
-                             rng=np.random.default_rng(int(rng.integers(0, 2**31))))
-            mdp = MDP(S=S, A=A, T=T_fixed, R=tmp.R, gamma=gamma,
-                      terminal=term_fixed, d0=d0_fixed.copy())
-            scores.append(agenticity_score(mdp, verbose=False, compute_mi=False,
-                                           rng=np.random.default_rng(int(rng.integers(0, 2**31)))))
-        results[p] = scores
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Group 3a: γ sweep
-# ---------------------------------------------------------------------------
-
-def run_gamma_sweep(
-    gammas: list = None,
-    S: int = 20,
-    A: int = 4,
-    k: int = 3,
-    R_conditions: list = None,
-    n_mdps: int = 50,
-    T_type: str = 'random',
-    T_alpha: float = 0.1,
-    rng_seed: int = 42,
-) -> dict:
-    """
-    Group 3a: for each (R_type, R_scale, gamma) triple, sample n_mdps MDPs and
-    compute agenticity scores.
-    Returns {(R_type, R_scale, gamma): [score dicts]}.
-    """
-    if gammas is None:
-        gammas = [0.5, 0.7, 0.8, 0.9, 0.95, 0.99]
-    if R_conditions is None:
-        R_conditions = [('spike_slab', 0.1), ('gaussian', 1.0)]
-    rng = np.random.default_rng(rng_seed)
-    results = {}
-    for R_type, R_scale in R_conditions:
-        for gamma in gammas:
-            scores = []
-            for _ in range(n_mdps):
-                mdp = random_mdp(S, A, gamma=gamma, k=k,
-                                 R_type=R_type, R_scale=R_scale, terminal_states=1,
-                                 T_type=T_type, T_alpha=T_alpha,
-                                 rng=np.random.default_rng(int(rng.integers(0, 2**31))))
-                scores.append(agenticity_score(mdp, verbose=False, compute_mi=False,
-                                               rng=np.random.default_rng(int(rng.integers(0, 2**31)))))
-            results[(R_type, R_scale, gamma)] = scores
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Group 2: T-sensitivity
-# ---------------------------------------------------------------------------
-
-def run_t_sensitivity(
-    n_R: int = 100,
-    S: int = 20,
-    A: int = 4,
-    gamma: float = 0.95,
-    k: int = 3,
-    R_conditions: list = None,
-    T_types: list = None,
-    T_alpha: float = 0.1,
-    rng_seed: int = 42,
-) -> dict:
-    """
-    Group 2: for each R sample, evaluate agenticity under multiple T structures.
-
-    Fixes n_R reward matrices per (R_type, R_scale) then scores each R under
-    every T_type independently. Index i in each T_type list corresponds to the
-    same R_i, enabling paired scatter plots.
-
-    Returns {(R_type, R_scale): {T_type: [score dicts]}}.
-    """
-    if R_conditions is None:
-        R_conditions = [('gaussian', 1.0), ('spike_slab', 0.05)]
-    if T_types is None:
-        T_types = ['uniform', 'dirichlet', 'deterministic']
-    rng = np.random.default_rng(rng_seed)
-    terminal = set(range(S - 1, S))
-    non_terminal = [s for s in range(S) if s not in terminal]
-    d0 = np.zeros(S)
-    d0[non_terminal] = 1.0 / len(non_terminal)
-
-    results = {}
-    for R_type, R_scale in R_conditions:
-        R_list = []
-        for _ in range(n_R):
-            tmp = random_mdp(S, A, gamma=gamma, k=k,
-                             R_type=R_type, R_scale=R_scale, terminal_states=1,
-                             rng=np.random.default_rng(int(rng.integers(0, 2**31))))
-            R_list.append(tmp.R.copy())
-
-        paired = {T_type: [] for T_type in T_types}
-        for R_mat in R_list:
-            for T_type in T_types:
-                tmp_t = random_mdp(S, A, gamma=gamma, k=k,
-                                   R_type='gaussian', terminal_states=1,
-                                   T_type=T_type, T_alpha=T_alpha,
-                                   rng=np.random.default_rng(int(rng.integers(0, 2**31))))
-                mdp = MDP(S=S, A=A, T=tmp_t.T, R=R_mat, gamma=gamma,
-                          terminal=terminal, d0=d0.copy())
-                paired[T_type].append(
-                    agenticity_score(mdp, verbose=False, compute_mi=False,
-                                     rng=np.random.default_rng(int(rng.integers(0, 2**31))))
-                )
-        results[(R_type, R_scale)] = paired
-    return results
-
-
-# ---------------------------------------------------------------------------
-# Group 3b: S sweep
-# ---------------------------------------------------------------------------
-
-def run_s_sweep(
-    S_values: list = None,
-    A: int = 4,
-    gamma: float = 0.95,
-    k: int = 3,
-    R_type: str = 'gaussian',
-    R_scale: float = 1.0,
-    T_types: list = None,
-    T_alpha: float = 0.1,
-    n_mdps: int = 50,
-    rng_seed: int = 42,
-) -> dict:
-    """
-    Group 3b: sweep S_values × T_types. Returns {(S, T_type): [score dicts]}.
-    """
-    if S_values is None:
-        S_values = [5, 10, 20, 50, 100]
-    if T_types is None:
-        T_types = ['uniform', 'dirichlet', 'deterministic']
-    rng = np.random.default_rng(rng_seed)
-    results = {}
-    for S in S_values:
-        for T_type in T_types:
-            scores = []
-            for _ in range(n_mdps):
-                mdp = random_mdp(S, A, gamma=gamma, k=k,
-                                 R_type=R_type, R_scale=R_scale, terminal_states=1,
-                                 T_type=T_type, T_alpha=T_alpha,
-                                 rng=np.random.default_rng(int(rng.integers(0, 2**31))))
-                scores.append(agenticity_score(mdp, verbose=False, compute_mi=False,
-                                               rng=np.random.default_rng(int(rng.integers(0, 2**31)))))
-            results[(S, T_type)] = scores
-    return results

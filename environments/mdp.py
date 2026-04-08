@@ -33,8 +33,8 @@ if __name__ == '__main__':
     gw2 = add_potential_shaping(gw, Phi)
     Actrl2 = control_advantage(gw2, pi0)
     R1_2 = one_step_recovery(gw2, pi0)
-    print(f"  Δ A_ctrl = {Actrl2 - Actrl:.2e}  (should be ~0)")
-    print(f"  Δ R1     = {R1_2 - R1:.2e}  (should be ~0)")
+    print(f"  diff A_ctrl = {Actrl2 - Actrl:.2e}  (should be ~0)")
+    print(f"  diff R1     = {R1_2 - R1:.2e}  (should be ~0)")
 
     # --- Week 3: agenticity proxies ---
     print("\n" + "=" * 70)

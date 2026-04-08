@@ -1,14 +1,17 @@
 """
 pams.py — Planning Agenticity Measures (PAMs) + agenticity_score.
+Integrated with Active Inference metrics: Empowerment and STARC.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
-from scipy.stats import entropy as scipy_entropy  # noqa: F401 (scipy stubs absent)
+from scipy.stats import entropy as scipy_entropy  # noqa: F401
+from scipy.optimize import minimize
 from core import (MDP, value_iteration,
                   value_under_random_policy, soft_value_iteration,
-                  finite_horizon_lookahead_policy)
+                  finite_horizon_lookahead_policy,
+                  get_canonical_reward, starc_norm) # Added STARC helpers
 from w2_metrics import control_advantage, one_step_recovery
 
 
@@ -84,6 +87,8 @@ def early_action_mi(mdp: MDP, pi: np.ndarray,
     """
     I(A_{1:k}; G | s_0) - I(A_{k+1:T}; G | s_0).
     Conditioned on s_0 for shaping invariance. Uses epsilon-greedy (eps=0.3).
+    
+    Vectorized implementation for performance.
     """
     if rng is None:
         rng = np.random.default_rng(42)
@@ -91,31 +96,55 @@ def early_action_mi(mdp: MDP, pi: np.ndarray,
         early_cutoff = max(1, horizon // 3)
 
     epsilon = 0.3
-    start_states, action_seqs, returns = [], [], []
+    
+    # Vectorized simulation
+    s_batch = rng.integers(0, mdp.S, size=n_episodes)
+    s0_batch = s_batch.copy()
+    active_mask = np.ones(n_episodes, dtype=bool)
+    
+    action_seqs = np.full((n_episodes, horizon), -1, dtype=int)
+    returns = np.zeros(n_episodes)
+    discounts = np.ones(n_episodes)
 
-    for _ in range(n_episodes):
-        s0 = rng.integers(0, mdp.S)
-        s = s0
-        G, discount, actions = 0.0, 1.0, []
+    # Precompute cumulative transitions for fast sampling
+    T_cumsum = np.cumsum(mdp.T, axis=2)
+    
+    # Terminal states mask
+    is_terminal = np.zeros(mdp.S, dtype=bool)
+    for ts in mdp.terminal:
+        is_terminal[ts] = True
 
-        for t in range(horizon):
-            if s in mdp.terminal:
-                actions.extend([-1] * (horizon - t))
-                break
-            a = rng.integers(0, mdp.A) if rng.random() < epsilon else pi[s]
-            actions.append(a)
-            s_next = rng.choice(mdp.S, p=mdp.T[s, a, :])
-            G += discount * mdp.R[s, a, s_next]
-            discount *= mdp.gamma
-            s = s_next
-
-        start_states.append(s0)
-        action_seqs.append(actions[:horizon])
-        returns.append(G)
-
-    start_states = np.array(start_states)
-    returns = np.array(returns)
-    action_seqs = np.array(action_seqs)
+    for t in range(horizon):
+        if not np.any(active_mask):
+            break
+            
+        # Vectorized action selection
+        rand_mask = rng.random(n_episodes) < epsilon
+        actions = np.zeros(n_episodes, dtype=int)
+        actions[rand_mask] = rng.integers(0, mdp.A, size=np.sum(rand_mask))
+        actions[~rand_mask] = pi[s_batch[~rand_mask]]
+        
+        action_seqs[active_mask, t] = actions[active_mask]
+        
+        # Vectorized state transitions
+        curr_s = s_batch[active_mask]
+        curr_a = actions[active_mask]
+        
+        # Sample next state using cumulative distribution
+        r = rng.random(len(curr_s))[:, None]
+        next_s = (T_cumsum[curr_s, curr_a, :] < r).sum(axis=1)
+        next_s = np.clip(next_s, 0, mdp.S - 1)
+        
+        # Rewards (Fancy indexing)
+        # Note: mdp.R is (S, A, S). We sample R[s, a, s'] for each agent.
+        rewards = mdp.R[curr_s, curr_a, next_s]
+        
+        returns[active_mask] += discounts[active_mask] * rewards
+        discounts[active_mask] *= mdp.gamma
+        s_batch[active_mask] = next_s
+        
+        # Update active mask
+        active_mask[active_mask] = ~is_terminal[next_s]
 
     def hash_seq(seqs):
         shifted = seqs + 1
@@ -143,11 +172,11 @@ def early_action_mi(mdp: MDP, pi: np.ndarray,
         mi = np.sum(joint[mask] * np.log(joint[mask] / (px * py + 1e-12)[mask]))
         return max(0.0, float(mi))
 
-    unique_s0 = np.unique(start_states)
+    unique_s0 = np.unique(s0_batch)
     mi_early_parts, mi_late_parts, group_weights = [], [], []
 
     for s0 in unique_s0:
-        mask = start_states == s0
+        mask = s0_batch == s0
         n_s0 = mask.sum()
         if n_s0 < min_samples_per_s0:
             continue
@@ -247,25 +276,29 @@ def effective_planning_horizon(
     J_rand = float(mdp.d0 @ V_rand)
     gap = J_star - J_rand
 
-    # Raise guard to 1e-6: potential rewards leave numerical residuals of ~1e-9
-    # in J*-J^rand which would otherwise cause spurious max_k returns.
     if abs(gap) < 1e-6:
         return {'H_eps': 0, 'max_k': max_k, 'ratios': [0.0], 'gap': round(gap, 6), 'eps': eps}
 
-    ratios = []
-    for k in range(max_k + 1):
-        if k == 0:
+    # Binary search for k
+    low = 0
+    high = max_k
+    best_k = max_k
+    
+    while low <= high:
+        mid = (low + high) // 2
+        if mid == 0:
             V_k = V_rand
         else:
-            V_k, _ = finite_horizon_lookahead_policy(mdp, k, V_rand)
-
+            V_k, _ = finite_horizon_lookahead_policy(mdp, mid, V_rand)
+            
         ratio = (J_star - float(mdp.d0 @ V_k)) / gap
-        ratios.append(round(float(ratio), 6))
-
         if ratio <= eps:
-            return {'H_eps': k, 'max_k': max_k, 'ratios': ratios, 'gap': round(gap, 6), 'eps': eps}
+            best_k = mid
+            high = mid - 1
+        else:
+            low = mid + 1
 
-    return {'H_eps': max_k, 'max_k': max_k, 'ratios': ratios, 'gap': round(gap, 6), 'eps': eps}
+    return {'H_eps': best_k, 'max_k': max_k, 'gap': round(gap, 6), 'eps': eps}
 
 
 def mce_policy_entropy(
@@ -301,7 +334,7 @@ def mce_policy_entropy(
     H_s = -np.sum(pi_mce * np.log(pi_mce + eps), axis=1)
 
     d0_nt = mdp.d0[non_terminal]
-    d0_nt = d0_nt / d0_nt.sum()
+    d0_nt = d0_nt / (d0_nt.sum() + 1e-12)
 
     entropy_raw = float(np.dot(d0_nt, H_s[non_terminal]))
     entropy_norm = float(entropy_raw / np.log(mdp.A))
@@ -310,6 +343,49 @@ def mce_policy_entropy(
         'entropy_raw': entropy_raw,
         'entropy_norm': entropy_norm,
         'alpha': alpha,
+    }
+
+
+def calculate_empowerment(mdp: MDP) -> dict:
+    """
+    Calculates Empowerment as the maximum Mutual Information between 
+    actions and future states: E(s) = max_{p(a)} [ H(S') - H(S'|A) ].
+    Based on Kapelko (2026), page 3.
+    """
+    emp_values = np.zeros(mdp.S)
+    
+    for s in range(mdp.S):
+        if s in mdp.terminal:
+            continue
+            
+        trans_probs = mdp.T[s, :, :] # Shape (A, S)
+        
+        def neg_mutual_info(p_a):
+            cond_ent = 0
+            for a in range(mdp.A):
+                cond_ent += p_a[a] * scipy_entropy(trans_probs[a] + 1e-12)
+            
+            p_s_next = p_a @ trans_probs
+            marginal_ent = scipy_entropy(p_s_next + 1e-12)
+            return -(marginal_ent - cond_ent)
+
+        cons = ({'type': 'eq', 'fun': lambda x: np.sum(x) - 1.0})
+        bounds = [(0, 1) for _ in range(mdp.A)]
+        init_guess = np.ones(mdp.A) / mdp.A
+        
+        res = minimize(neg_mutual_info, init_guess, bounds=bounds, constraints=cons)
+        emp_values[s] = -res.fun
+
+    non_terminal = [s for s in range(mdp.S) if s not in mdp.terminal]
+    if not non_terminal:
+        return {'score': 0.0, 'norm_score': 0.0}
+        
+    d0_nt = mdp.d0[non_terminal] / (mdp.d0[non_terminal].sum() + 1e-12)
+    avg_emp = float(np.dot(d0_nt, emp_values[non_terminal]))
+    
+    return {
+        'score': avg_emp,
+        'norm_score': float(1.0 - np.exp(-avg_emp))
     }
 
 
@@ -332,19 +408,18 @@ def agenticity_score(mdp: MDP, weights: dict = None,
     a good choice; pass the 'w2_empirical_scales' entry from run_pam_experiment).
     compute_mi:  if False, skip early_action_mi and renormalise composite.
     """
+    if rng is None:
+        rng = np.random.default_rng(42)
     if weights is None:
         if w2_scales is not None:
             weights = {'adv_gap': 0.20, 'vstar_var': 0.30, 'mi_diff': 0.25,
                        'ctrl_adv': 0.15, 'one_step': 0.10}
         else:
-            weights = {'adv_gap': 0.25, 'vstar_var': 0.40, 'mi_diff': 0.35}
-    if rng is None:
-        rng = np.random.default_rng(42)
-
+            # Adjusted for empowerment (Kapelko 2026 balance)
+            weights = {'adv_gap': 0.20, 'vstar_var': 0.20, 'mi_diff': 0.20, 'empowerment': 0.40}
+            
     V_star, Q_star, pi_star = value_iteration(mdp)
     V_rand = value_under_random_policy(mdp)
-
-    # Uniform random policy as baseline for Week 2 metrics
     pi_rand = np.ones((mdp.S, mdp.A)) / mdp.A
 
     # W2 metrics
@@ -365,13 +440,20 @@ def agenticity_score(mdp: MDP, weights: dict = None,
     h_eff   = effective_planning_horizon(mdp)
     mce_ent = mce_policy_entropy(mdp, alpha=1.0)
 
-    # ag is now range-normalised by range(V*-V^rand); clip to [0,1]
+    # New Active Inference Metrics
+    emp_res = calculate_empowerment(mdp)
+    emp_raw = emp_res['score']
+    emp_norm = emp_res['norm_score']
+
+    c_R = get_canonical_reward(mdp, V_star)
+    norm_starc = starc_norm(mdp, c_R)
+    starc_clarity = 1.0 - (1.0 / (1.0 + norm_starc))
+
+    # Normalization
     ag_norm = float(np.clip(ag, 0.0, 1.0))
-    # vv is now in [0, 0.25] (range-normalised variance); multiply by 4 → [0, 1]
     vv_norm = float(np.clip(4.0 * vv, 0.0, 1.0))
     mi_norm = float(np.clip((mi['mi_diff'] + 1) / 2, 0, 1)) if compute_mi else None
 
-    # W2 normalisation (only when scales are provided)
     def _nw(x: float, key: str) -> float:
         s = w2_scales.get(key, 1.0) if w2_scales else 1.0
         return float(1 - np.exp(-x / s)) if s > 1e-10 else 0.0
@@ -379,42 +461,37 @@ def agenticity_score(mdp: MDP, weights: dict = None,
     ctrl_adv_norm  = _nw(ctrl_adv, 'ctrl_adv')  if w2_scales else None
     one_step_norm  = _nw(one_step, 'one_step')   if w2_scales else None
 
-    # Build composite dynamically — auto-renormalises across active components
-    components: dict = {'adv_gap': ag_norm, 'vstar_var': vv_norm}
+    # Composite
+    components: dict = {'adv_gap': ag_norm, 'vstar_var': vv_norm, 'empowerment': emp_norm}
     if compute_mi:
-        components['mi_diff'] = mi_norm  # type: ignore[assignment]
+        components['mi_diff'] = mi_norm  # type: ignore
     if w2_scales is not None:
-        components['ctrl_adv'] = ctrl_adv_norm   # type: ignore[assignment]
-        components['one_step']  = one_step_norm  # type: ignore[assignment]
+        components['ctrl_adv'] = ctrl_adv_norm   # type: ignore
+        components['one_step']  = one_step_norm  # type: ignore
 
     w_total = sum(weights.get(k, 0.0) for k in components)
-    if w_total < 1e-10:
-        composite = 0.0
-    else:
-        composite = sum(weights.get(k, 0.0) * v
-                        for k, v in components.items()) / w_total
+    composite = sum(weights.get(k, 0.0) * v for k, v in components.items()) / (w_total + 1e-12)
 
     result = {
-        # PAMs (in composite)
         'adv_gap': round(ag, 4),
         'adv_gap_norm': round(ag_norm, 4),
         'vstar_var_raw': round(vv, 4),
         'vstar_var_norm': round(vv_norm, 4),
         'mi_early': mi['mi_early'],
         'mi_late':  mi['mi_late'],
-        'mi_diff':  mi['mi_diff'],
+        'mi_diff': mi['mi_diff'],
         'mi_diff_norm': round(mi_norm, 4) if mi_norm is not None else None,
         'adv_sparsity': round(asp, 4),
+        'empowerment_raw': round(emp_raw, 4),
+        'empowerment_norm': round(emp_norm, 4),
+        'starc_clarity': round(starc_clarity, 4),
         'composite': round(composite, 4),
-        # Diagnostic PAMs (not in composite)
         'H_eps': h_eff['H_eps'],
         'H_eps_norm': round(h_eff['H_eps'] / h_eff['max_k'], 4),
         'H_eps_max_k': h_eff['max_k'],
         'H_eps_gap': h_eff['gap'],
-        'H_eps_ratios': h_eff['ratios'],
         'mce_entropy_raw': round(mce_ent['entropy_raw'], 4),
         'mce_entropy_norm': round(mce_ent['entropy_norm'], 4),
-        # W2 metrics
         'ctrl_adv': round(ctrl_adv, 4),
         'ctrl_adv_norm': round(ctrl_adv_norm, 4) if ctrl_adv_norm is not None else None,
         'one_step_recovery': round(one_step, 4),
@@ -428,14 +505,12 @@ def agenticity_score(mdp: MDP, weights: dict = None,
         print(f"  [W2] Control advantage:                 {ctrl_adv:.4f}{ca_str}")
         print(f"  [W2] One-step recovery:                 {one_step:.4f}{os_str}")
         print(f"  Advantage gap (raw / norm):             {ag:.4f} / {ag_norm:.4f}")
-        print(f"  V*-V^rand variance (raw / norm):        {vv:.4f} / {vv_norm:.4f}  [range-norm, ×4→[0,1]]")
+        print(f"  V*-V^rand variance (raw / norm):        {vv:.4f} / {vv_norm:.4f}")
         if compute_mi:
-            print(f"  MI|s0 (early / late / diff):            {mi['mi_early']:.4f} / {mi['mi_late']:.4f} / {mi['mi_diff']:+.4f}")
-        else:
-            print(f"  MI|s0:                                  (skipped)")
-        print(f"  Effective planning horizon H_eps:       {h_eff['H_eps']}/{h_eff['max_k']} = {result['H_eps_norm']:.4f}  (gap={h_eff['gap']:.4f})")
-        print(f"  MCE entropy (raw / norm):               {mce_ent['entropy_raw']:.4f} / {mce_ent['entropy_norm']:.4f}")
-        print(f"  Advantage sparsity (diagnostic):        {asp:.4f}")
-        print(f"  ── COMPOSITE: {composite:.4f}")
+            print(f"  MI|s0 (early / late / diff):            {mi['mi_early']:.4f} / {mi['mi_late']:.4f} / {mi['mi_diff']:.4f}")
+        print(f"  [ActiveInf] Empowerment (raw / norm):    {emp_raw:.4f} / {emp_norm:.4f}")
+        print(f"  [STARC] Reward Clarity:                 {starc_clarity:.4f}")
+        print(f"  Effective planning horizon H_eps:       {h_eff['H_eps']}/{h_eff['max_k']}")
+        print(f"  -- COMPOSITE: {composite:.4f}")
 
     return result

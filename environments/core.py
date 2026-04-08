@@ -237,3 +237,38 @@ def add_potential_shaping(mdp: MDP, Phi):
     F = mdp.gamma * Phi[None, None, :] - Phi[:, None, None]
     return MDP(S=mdp.S, A=mdp.A, T=mdp.T, R=mdp.R + F,
                gamma=mdp.gamma, terminal=mdp.terminal, d0=mdp.d0.copy())
+
+
+def get_canonical_reward(mdp: MDP, V: np.ndarray) -> np.ndarray:
+    """
+    Computes the canonicalized reward function: 
+    c(R)(s,a,s') = R(s,a,s') - V(s) + gamma * V(s').
+    
+    This transformation ensures shaping-invariance by removing potential 
+    functions (Phi). Based on Kapelko (2026), page 9.
+    """
+    S, A = mdp.S, mdp.A
+    # Broadcast V to match R shape (S, A, S)
+    V_curr = V[:, None, None]  # V(s)
+    V_next = V[None, None, :]  # V(s')
+    
+    return mdp.R - V_curr + mdp.gamma * V_next
+
+def starc_norm(mdp: MDP, canonical_R: np.ndarray) -> float:
+    """
+    Computes the standardization factor n(R) = max_pi J(pi) - min_pi J(pi).
+    Used to normalize the scale of canonical rewards before comparison.
+    """
+    # Max J (optimal policy)
+    mdp_max = MDP(S=mdp.S, A=mdp.A, T=mdp.T, R=canonical_R, 
+                  gamma=mdp.gamma, terminal=mdp.terminal, d0=mdp.d0)
+    V_star, _, _ = value_iteration(mdp_max)
+    J_max = float(mdp.d0 @ V_star)
+    
+    # Min J (worst-case policy)
+    mdp_min = MDP(S=mdp.S, A=mdp.A, T=mdp.T, R=-canonical_R, 
+                  gamma=mdp.gamma, terminal=mdp.terminal, d0=mdp.d0)
+    V_min_neg, _, _ = value_iteration(mdp_min)
+    J_min = -float(mdp.d0 @ V_min_neg)
+    
+    return max(1e-10, J_max - J_min)
