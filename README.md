@@ -19,6 +19,7 @@ environments/           Shared library (import from here)
 01_pam_baseline/        Experiment 1 — Q1/Q2/Q3 PAM analysis (Plots 01–08)
 02_sampling_sweeps/     Experiment 2 — Group 1/2/3 sampling sweeps (Plots 09–13)
 03_mce_calibration/     Experiment 3 — MCE entropy alpha calibration (Plots 14–17)
+04_results_summary/     Cross-experiment summary — metric-organised figures + values doc
 
 plans+notes/            Synthesized research notes (research_notes.md)
 ```
@@ -49,6 +50,10 @@ cd 03_mce_calibration
 python 01_sweep.py          # N_T=5 canonical T's, N_R=500 R samples (~3 min)
 python 01_sweep.py --fast   # smoke test (~15 sec)
 python 02_plot.py           # Plots 14–17
+
+# Cross-experiment summary (requires experiments 1 and 2 built first)
+cd 04_results_summary
+python generate.py          # figures A–E + results/summary.md
 ```
 
 ---
@@ -156,6 +161,21 @@ Calibrates the α hyperparameter for MCE entropy using N_T=5 fixed T matrices an
 | 15 | Mean ± std vs α per R_type; thin lines = individual T's, band = between-T std |
 | 16 | T-sensitivity grid at α=0.25 — rows = R_type, columns = T; dashed = T mean, dotted = grand mean |
 | 17 | Between-type variance vs α — identifies discrimination sweet-spot; marks chosen α=0.25 |
+
+### `04_results_summary` — Cross-experiment summary
+
+Aggregates results from experiments 1 and 2 into metric-organised views. Run `python generate.py` after both experiments are built.
+
+| Output | Description |
+|---|---|
+| `figures/A_adv_gap_norm.pdf` | Advantage gap across all test conditions |
+| `figures/B_vstar_var_norm.pdf` | V* variance across all test conditions |
+| `figures/C_mce_entropy_norm.pdf` | MCE entropy across all test conditions |
+| `figures/D_H_eps_norm.pdf` | Planning horizon across all test conditions |
+| `figures/E_composite.pdf` | Composite score across all test conditions |
+| `results/summary.md` | Tables of mean ± std by metric × test type (Q3, Q1, σ-sweep, p-sweeps, γ-sweep, T-sensitivity Pearson r, S-sweep) |
+
+Each figure has 6 panels: Q3 human MDPs, Q1 by R_type, Gaussian σ sweep, p-sweep (Bernoulli + spike_slab), γ-sweep, S-sweep. Plot references annotated on each panel.
 
 ---
 
