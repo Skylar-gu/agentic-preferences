@@ -6,10 +6,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import numpy as np
 from scipy.stats import entropy as scipy_entropy  # noqa: F401 (scipy stubs absent)
-from core import (MDP, value_iteration,
+from core import (MDP, value_iteration, policy_evaluation,
                   value_under_random_policy, soft_value_iteration,
                   finite_horizon_lookahead_policy)
-from w2_metrics import control_advantage, one_step_recovery
+from metrics import control_advantage, one_step_recovery
 
 
 # ---------------------------------------------------------------------------
@@ -270,8 +270,9 @@ def effective_planning_horizon(
 
 def mce_policy_entropy(
     mdp: MDP,
-    alpha: float = 1.0,
+    alpha: float = 0.25,
     eps: float = 1e-12,
+    normalize_rewards: bool = True,
 ) -> dict:
     """
     Entropy of the MCE policy weighted by d0 over non-terminal states.
@@ -280,19 +281,40 @@ def mce_policy_entropy(
 
     d0 is renormalised over non-terminal states before weighting.
 
+    Reward normalisation (normalize_rewards=True, default):
+      R is divided by std(R) before soft VI so that alpha has a
+      consistent meaning regardless of reward scale. Other PAMs achieve
+      scale-invariance by normalising their outputs (ratios of V* - V^rand);
+      MCE needs input-side normalisation because alpha lives in the same
+      space as Q. Without this, alpha=0.1 saturates near 1.0 for all
+      non-potential types; with normalization, alpha=0.25 gives
+      between-type discrimination (potential→0.0, non-potential→0.5–0.7).
+
+    alpha=0.25: chosen by empirical sweep (N=40 MDPs × 6 R_types × 8 alphas).
+      Maximises between-type variance (0.0025) across non-potential R_types
+      without saturation at either end.
+
     Shaping-invariant under all three reward equivalence transforms:
     1. Positive scaling: scales Q by constant c, cancels inside softmax.
     2. Potential shaping: Phi(s) term is action-independent, cancels inside
        softmax at each state s.
     3. S'-redistribution: delta(s,a,s') with sum_{s'} T(s,a,s')*delta=0
        preserves E[R(s,a,s')], so Q^S unchanged, pi_MCE unchanged.
+    Note: reward normalisation preserves shaping-invariance because std(R)
+    is a global scalar — potential-shaping offsets still cancel in softmax.
 
     Returns:
-      entropy_raw:  H(pi_MCE) in nats
+      entropy_raw:  H(pi_MCE) in nats (on normalised-R scale)
       entropy_norm: H / log(A), in [0,1]; 1=uniform, 0=deterministic
       alpha:        temperature used
     """
-    _, _, pi_mce = soft_value_iteration(mdp, alpha=alpha)
+    from dataclasses import replace as dc_replace
+    if normalize_rewards:
+        r_std = float(mdp.R.std())
+        mdp_vi = dc_replace(mdp, R=mdp.R / r_std) if r_std > 1e-8 else mdp
+    else:
+        mdp_vi = mdp
+    _, _, pi_mce = soft_value_iteration(mdp_vi, alpha=alpha)
 
     non_terminal = [s for s in range(mdp.S) if s not in mdp.terminal]
     if not non_terminal:
@@ -313,41 +335,149 @@ def mce_policy_entropy(
     }
 
 
+def agenticity_gap(mdp: MDP) -> dict:
+    """
+    AgenticityGap = J(π*) − J(π*_myopic), normalised by J(π*) − J(π^rand).
+
+    π*_myopic acts greedily on expected immediate reward at each state:
+        π*_myopic(s) = argmax_a  Σ_{s'} T(s,a,s') R(s,a,s')
+
+    Large gap → R structurally requires multi-step planning; the optimal
+    policy cannot be approximated by ignoring future value.
+
+    NOT shaping-invariant: under R' = R + γΦ(s') − Φ(s), the expected
+    immediate reward gains an action-dependent term γ Σ_{s'} T(s,a,s') Φ(s'),
+    which can change the argmax and thus π*_myopic.
+
+    Returns:
+      gap_raw:  J(π*) − J(π*_myopic) in reward units
+      gap_norm: gap_raw / (J(π*) − J(π^rand)), clipped to [0, 1]
+      J_star, J_myopic, J_rand: constituent values
+    """
+    V_star, _, _ = value_iteration(mdp)
+    V_rand = value_under_random_policy(mdp)
+
+    # π*_myopic: greedy on expected immediate reward
+    R_sa = np.einsum('ijk,ijk->ij', mdp.T, mdp.R)   # (S, A)
+    for s in mdp.terminal:
+        R_sa[s, :] = 0.0
+    pi_myopic = R_sa.argmax(axis=1)                  # shape (S,)
+
+    V_myopic = policy_evaluation(mdp, pi_myopic)
+
+    J_star   = float(mdp.d0 @ V_star)
+    J_myopic = float(mdp.d0 @ V_myopic)
+    J_rand   = float(mdp.d0 @ V_rand)
+
+    gap_raw = J_star - J_myopic
+    denom   = J_star - J_rand
+    gap_norm = float(np.clip(gap_raw / denom, 0.0, 1.0)) if abs(denom) > 1e-10 else 0.0
+
+    return {
+        'gap_raw':  round(gap_raw, 4),
+        'gap_norm': round(gap_norm, 4),
+        'J_star':   round(J_star, 4),
+        'J_myopic': round(J_myopic, 4),
+        'J_rand':   round(J_rand, 4),
+    }
+
+
+def option_value(mdp: MDP) -> dict:
+    """
+    OptionValue = E_{s~d0}[V*(s) − max_a E_{s'}[R(s,a,s')]], normalised.
+
+    Measures how much the future matters relative to the best immediate
+    expected reward.  High → long-range consequences dominate; myopic
+    optimisation cannot exploit the value structure.
+    Low → immediate rewards capture most of the value; planning adds little.
+
+    Normalised by the range of V* over non-terminal states so the result
+    is scale-invariant.
+
+    NOT shaping-invariant: under R' = R + γΦ(s') − Φ(s), V*(s) shifts by
+    −Φ(s) while max_a E[R'(s,a,s')] shifts by a mix of Φ(s) and
+    γ E_{s'}[T(s,a*,s') Φ(s')], so the difference changes with Φ.
+
+    Returns:
+      ov_raw:  d0-weighted mean of V*(s) − max_a E[R(s,a)]
+      ov_norm: ov_raw / range(V*), clipped to [0, 1]
+    """
+    V_star, _, _ = value_iteration(mdp)
+
+    R_sa = np.einsum('ijk,ijk->ij', mdp.T, mdp.R)   # (S, A)
+    for s in mdp.terminal:
+        R_sa[s, :] = 0.0
+
+    non_terminal = [s for s in range(mdp.S) if s not in mdp.terminal]
+    if not non_terminal:
+        return {'ov_raw': float('nan'), 'ov_norm': float('nan')}
+
+    best_imm = R_sa[non_terminal].max(axis=1)
+    V_nt     = V_star[non_terminal]
+    d0_nt    = mdp.d0[non_terminal]
+    d0_nt    = d0_nt / d0_nt.sum()
+
+    ov_raw  = float(np.dot(d0_nt, V_nt - best_imm))
+    v_range = float(V_nt.max() - V_nt.min())
+    ov_norm = float(np.clip(ov_raw / v_range, 0.0, 1.0)) if v_range > 1e-10 else 0.0
+
+    return {
+        'ov_raw':  round(ov_raw, 4),
+        'ov_norm': round(ov_norm, 4),
+    }
+
+
 def agenticity_score(mdp: MDP, weights: dict = None,
                      horizon: int = 60, n_episodes: int = 2000,
                      verbose: bool = True,
                      rng: np.random.Generator = None,
                      compute_mi: bool = True,
+                     compute_entropy: bool = True,
                      w2_scales: dict = None) -> dict:
     """
-    Composite agenticity (all shaping-invariant).
+    Composite agenticity score (all metrics shaping-invariant).
 
-    Default weights (W3 only): adv_gap=0.25, vstar_var=0.40, mi_diff=0.35.
+    Default weights: equal across active metrics (adv_gap, vstar_var,
+    mi_diff, mce_entropy). Auto-renormalised so inactive metrics (compute_mi=False
+    or compute_entropy=False) do not alter the relative weights of the rest.
 
-    w2_scales: if provided, W2 metrics (ctrl_adv, one_step_recovery) are
-    normalised via 1-exp(-x/scale) and included in the composite.
-    Default weights when w2_scales is given:
-      adv_gap=0.20, vstar_var=0.30, mi_diff=0.25, ctrl_adv=0.15, one_step=0.10.
+    Recalibration rationale (April 2026):
+      Within each R_type, r(adv_gap, vstar_var) = 0.02–0.23 — they are
+      independent and both informative. Equal weighting is the principled
+      choice.
+
+      MCE entropy re-enabled (compute_entropy=True default) after fixing
+      reward normalisation: R is now divided by std(R) before soft VI, making
+      alpha scale-invariant. alpha=0.25 was selected by empirical sweep:
+      maximises between-type variance across non-potential R_types (0.0025)
+      without upper/lower saturation. With this fix, mce_entropy_norm scores
+      potential rewards at 0.0 and non-potential at 0.5–0.7.
+
+    w2_scales: if provided, baseline metrics (ctrl_adv, one_step_recovery) are
+    normalised via 1-exp(-x/scale) and included in the composite with equal
+    weight alongside the PAMs.
     Scales dict keys: 'ctrl_adv', 'one_step' (95th-pct values from Q1 are
-    a good choice; pass the 'w2_empirical_scales' entry from run_pam_experiment).
-    compute_mi:  if False, skip early_action_mi and renormalise composite.
+    a good choice; pass the 'baseline_empirical_scales' entry from run_pam_experiment).
+    compute_mi:       if False, skip early_action_mi and renormalise composite.
+    compute_entropy:  if True (default), include mce_policy_entropy in composite.
     """
     if weights is None:
         if w2_scales is not None:
-            weights = {'adv_gap': 0.20, 'vstar_var': 0.30, 'mi_diff': 0.25,
-                       'ctrl_adv': 0.15, 'one_step': 0.10}
+            weights = {'adv_gap': 0.20, 'vstar_var': 0.20, 'mi_diff': 0.20,
+                       'mce_entropy': 0.20, 'ctrl_adv': 0.20, 'one_step': 0.20}
         else:
-            weights = {'adv_gap': 0.25, 'vstar_var': 0.40, 'mi_diff': 0.35}
+            weights = {'adv_gap': 0.50, 'vstar_var': 0.50, 'mi_diff': 0.50,
+                       'mce_entropy': 0.50}
     if rng is None:
         rng = np.random.default_rng(42)
 
     V_star, Q_star, pi_star = value_iteration(mdp)
     V_rand = value_under_random_policy(mdp)
 
-    # Uniform random policy as baseline for Week 2 metrics
+    # Uniform random policy as baseline for baseline metrics
     pi_rand = np.ones((mdp.S, mdp.A)) / mdp.A
 
-    # W2 metrics
+    # Baseline metrics
     ctrl_adv  = control_advantage(mdp, pi_rand)
     one_step  = one_step_recovery(mdp, pi_rand)
 
@@ -363,7 +493,9 @@ def agenticity_score(mdp: MDP, weights: dict = None,
         mi = {'mi_early': None, 'mi_late': None, 'mi_diff': None}
 
     h_eff   = effective_planning_horizon(mdp)
-    mce_ent = mce_policy_entropy(mdp, alpha=1.0)
+    mce_ent = mce_policy_entropy(mdp, alpha=0.25, normalize_rewards=True) if compute_entropy else None
+    ag_gap  = agenticity_gap(mdp)
+    ov      = option_value(mdp)
 
     # ag is now range-normalised by range(V*-V^rand); clip to [0,1]
     ag_norm = float(np.clip(ag, 0.0, 1.0))
@@ -371,7 +503,7 @@ def agenticity_score(mdp: MDP, weights: dict = None,
     vv_norm = float(np.clip(4.0 * vv, 0.0, 1.0))
     mi_norm = float(np.clip((mi['mi_diff'] + 1) / 2, 0, 1)) if compute_mi else None
 
-    # W2 normalisation (only when scales are provided)
+    # Baseline metric normalisation (only when scales are provided)
     def _nw(x: float, key: str) -> float:
         s = w2_scales.get(key, 1.0) if w2_scales else 1.0
         return float(1 - np.exp(-x / s)) if s > 1e-10 else 0.0
@@ -380,9 +512,13 @@ def agenticity_score(mdp: MDP, weights: dict = None,
     one_step_norm  = _nw(one_step, 'one_step')   if w2_scales else None
 
     # Build composite dynamically — auto-renormalises across active components
+    mce_norm = float(np.clip(1.0 - mce_ent['entropy_norm'], 0.0, 1.0)) if mce_ent else None
+
     components: dict = {'adv_gap': ag_norm, 'vstar_var': vv_norm}
     if compute_mi:
         components['mi_diff'] = mi_norm  # type: ignore[assignment]
+    if compute_entropy and mce_norm is not None:
+        components['mce_entropy'] = mce_norm
     if w2_scales is not None:
         components['ctrl_adv'] = ctrl_adv_norm   # type: ignore[assignment]
         components['one_step']  = one_step_norm  # type: ignore[assignment]
@@ -412,9 +548,14 @@ def agenticity_score(mdp: MDP, weights: dict = None,
         'H_eps_max_k': h_eff['max_k'],
         'H_eps_gap': h_eff['gap'],
         'H_eps_ratios': h_eff['ratios'],
-        'mce_entropy_raw': round(mce_ent['entropy_raw'], 4),
-        'mce_entropy_norm': round(mce_ent['entropy_norm'], 4),
-        # W2 metrics
+        'mce_entropy_raw':  round(mce_ent['entropy_raw'],  4) if mce_ent else None,
+        'mce_entropy_norm': round(mce_norm,                4) if mce_norm is not None else None,
+        # Candidate proxies (diagnostic; not shaping-invariant)
+        'agenticity_gap_raw':  ag_gap['gap_raw'],
+        'agenticity_gap_norm': ag_gap['gap_norm'],
+        'option_value_raw':    ov['ov_raw'],
+        'option_value_norm':   ov['ov_norm'],
+        # Baseline metrics
         'ctrl_adv': round(ctrl_adv, 4),
         'ctrl_adv_norm': round(ctrl_adv_norm, 4) if ctrl_adv_norm is not None else None,
         'one_step_recovery': round(one_step, 4),
@@ -425,8 +566,8 @@ def agenticity_score(mdp: MDP, weights: dict = None,
         in_comp = w2_scales is not None
         ca_str = (f" / norm={ctrl_adv_norm:.4f}" if in_comp else " (diag)")
         os_str = (f" / norm={one_step_norm:.4f}"  if in_comp else " (diag)")
-        print(f"  [W2] Control advantage:                 {ctrl_adv:.4f}{ca_str}")
-        print(f"  [W2] One-step recovery:                 {one_step:.4f}{os_str}")
+        print(f"  Control advantage:                      {ctrl_adv:.4f}{ca_str}")
+        print(f"  One-step recovery:                      {one_step:.4f}{os_str}")
         print(f"  Advantage gap (raw / norm):             {ag:.4f} / {ag_norm:.4f}")
         print(f"  V*-V^rand variance (raw / norm):        {vv:.4f} / {vv_norm:.4f}  [range-norm, ×4→[0,1]]")
         if compute_mi:
@@ -434,7 +575,12 @@ def agenticity_score(mdp: MDP, weights: dict = None,
         else:
             print(f"  MI|s0:                                  (skipped)")
         print(f"  Effective planning horizon H_eps:       {h_eff['H_eps']}/{h_eff['max_k']} = {result['H_eps_norm']:.4f}  (gap={h_eff['gap']:.4f})")
-        print(f"  MCE entropy (raw / norm):               {mce_ent['entropy_raw']:.4f} / {mce_ent['entropy_norm']:.4f}")
+        if mce_ent:
+            print(f"  MCE entropy (raw / 1-norm):             {mce_ent['entropy_raw']:.4f} / {mce_norm:.4f}  [R-norm, α=0.25]")
+        else:
+            print(f"  MCE entropy:                            (skipped)")
+        print(f"  Agenticity gap (raw / norm):            {ag_gap['gap_raw']:.4f} / {ag_gap['gap_norm']:.4f}  [not shaping-inv]")
+        print(f"  Option value (raw / norm):              {ov['ov_raw']:.4f} / {ov['ov_norm']:.4f}  [not shaping-inv]")
         print(f"  Advantage sparsity (diagnostic):        {asp:.4f}")
         print(f"  ── COMPOSITE: {composite:.4f}")
 

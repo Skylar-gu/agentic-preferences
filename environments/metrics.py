@@ -1,5 +1,5 @@
 """
-w2_metrics.py — Week 2 shaping-invariant metrics.
+metrics.py — Shaping-invariant baseline metrics.
 """
 import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -9,7 +9,7 @@ from core import MDP, value_iteration, policy_evaluation, discounted_occupancy
 
 
 # ---------------------------------------------------------------------------
-# Week 2 Metrics (shaping-invariant, use d0)
+# Shaping-invariant baseline metrics (use d0)
 # ---------------------------------------------------------------------------
 
 def control_advantage(mdp: MDP, pi_baseline):

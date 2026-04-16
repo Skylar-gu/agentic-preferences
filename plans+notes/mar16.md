@@ -1,7 +1,6 @@
- ---                        
-  environments/mdp.py — Summary    
+# Environments + Metrics Reference
 
-  This file is a finite MDP research testbed for measuring agenticity — how much an agent's planning actually matters in a given environment. All computation is exact dynamic programming (no RL training); metrics are designed to be invariant to potential-based reward shaping, so they measure structural properties of the MDP rather than arbitrary reward offsets.
+Finite MDP testbed for measuring agenticity — how much an agent's planning actually matters. All computation is exact dynamic programming (no RL training); metrics are designed to be invariant to potential-based reward shaping.
 
 Reward functions across environments: 
   gridworld() (5×5, slip=0.1)                                                                                                                                                                                             
@@ -45,7 +44,7 @@ Reward functions across environments:
 
   1. Core DP utilities — value iteration, policy evaluation, discounted occupancy, finite-horizon lookahead, potential shaping transform.
 
-  2. Shaping-invariant metrics (Week 2) — three scalar summaries of an MDP's decision structure, verified to be numerically invariant under reward shaping R' = R + γΦ(s') − Φ(s):
+  2. Shaping-invariant metrics (Baseline metrics) — three scalar summaries of an MDP's decision structure, verified to be numerically invariant under reward shaping R' = R + γΦ(s') − Φ(s):
 
   ┌────────────────────────────┬───────────────────────────────────────────────────┬────────────────────────────────────────────────────────────────────────┐
   │           Metric           │                      Formula                      │                            What it captures                            │
@@ -57,7 +56,7 @@ Reward functions across environments:
   │ Planning Pressure (P_h)    │ E_{s~d0}[V*(s) − V^{πh}(s)]                       │ Cost of using a depth-limited lookahead instead of full planning       │
   └────────────────────────────┴───────────────────────────────────────────────────┴────────────────────────────────────────────────────────────────────────┘
 
-  3. Agenticity proxies (Week 3) — four normalized proxies benchmarked across 7 MDPs, combined into a composite score:
+  3. Agenticity proxies (PAM proxies) — four normalized proxies benchmarked across 7 MDPs, combined into a composite score:
 
   ┌────────────────────┬─────────────────┬────────────────────────────────────────────────────────────────────────────────────────┐
   │       Proxy        │     Weight      │                                    What it captures                                    │
@@ -76,7 +75,7 @@ Reward functions across environments:
   ---
   Shaping Invariance Check (5×5 gridworld, slip=0.1)
 
-  All three Week 2 metrics are numerically invariant under a random potential Φ (differences are floating-point noise):
+  All three Baseline metrics metrics are numerically invariant under a random potential Φ (differences are floating-point noise):
 
   ┌────────┬────────┬─────────────────┐
   │ Metric │ Value  │ Δ under shaping │

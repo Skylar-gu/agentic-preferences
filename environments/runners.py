@@ -8,6 +8,7 @@ import numpy as np
 from core import MDP
 from pams import agenticity_score
 from envs import make_chain_mdp, make_grid_mdp
+from metrics import control_advantage, one_step_recovery  # noqa: F401 (re-export)
 
 
 # ---------------------------------------------------------------------------
@@ -49,9 +50,13 @@ def random_mdp(
       'potential':  R(s,a,s') = gamma*Phi(s') - Phi(s), Phi(s) ~ N(0, R_scale).
                     Non-agentic by construction — does not change policy ordering.
                     Useful as a negative control: PAMs should score these low.
-      'goal':       R(s,a,s') = 1[s'=g] for a uniformly random non-terminal goal g.
-                    Goal-conditioned sparse reward; structurally realistic for
-                    navigation domains. Agenticity varies with goal location.
+      'goal':          R(s,a,s') = 1[s'=g] for a uniformly random non-terminal goal g.
+                       Goal-conditioned sparse reward; structurally realistic for
+                       navigation domains. Agenticity varies with goal location.
+      'uniform_simplex': Dirichlet(1,...,1) over all S×A×S entries — uniform prior
+                       over the reward simplex. Non-negative, sums to 1 across all
+                       (s,a,s') triples. Same prior as Turner et al. (2021).
+                       R_scale is ignored for this type.
 
     Terminal states: last `terminal_states` indices {S-terminal_states, ..., S-1}.
     d0: uniform over non-terminal states.
@@ -137,10 +142,16 @@ def random_mdp(
     elif R_type == 'spike_slab':
         mask = (rng.uniform(0, 1, size=(S, A, S)) < R_scale).astype(float)
         R = mask * rng.normal(0, 1.0, size=(S, A, S))
+    elif R_type == 'uniform_simplex':
+        # Uniform prior over the reward simplex: Dirichlet(1,...,1) over all S×A×S entries.
+        # Non-negative, sums to 1 across all (s,a,s') triples. Same prior as Turner et al. (2021).
+        flat = rng.dirichlet(np.ones(S * A * S))
+        R = flat.reshape(S, A, S)
     else:
         raise ValueError(
             f"Unknown R_type: {R_type!r}. "
-            "Choose 'gaussian', 'uniform', 'bernoulli', 'potential', 'goal', or 'spike_slab'."
+            "Choose 'gaussian', 'uniform', 'bernoulli', 'potential', 'goal', 'spike_slab', "
+            "or 'uniform_simplex'."
         )
 
     for s in terminal:
@@ -156,11 +167,11 @@ def random_mdp(
 
 
 # ---------------------------------------------------------------------------
-# W2 normalization utility
+# Baseline metric normalisation utility
 # ---------------------------------------------------------------------------
 
-def norm_w2(ctrl_adv, one_step, scales):
-    """Normalize W2 metrics using empirical 95th-pct scales: 1-exp(-x/scale)."""
+def norm_baseline(ctrl_adv, one_step, scales):
+    """Normalise baseline metrics using empirical 95th-pct scales: 1-exp(-x/scale)."""
     def _n(x, s):
         return float(1 - np.exp(-x / s)) if s > 1e-10 else 0.0
     return {
@@ -230,25 +241,28 @@ def run_pam_experiment(
             n_episodes=(300 if include_mi else n_ep),
         )
 
+    def _nan(v):
+        return float('nan') if v is None else v
+
     def _pam_vector_norm(r):
         return np.array([
             r['adv_gap_norm'],
             r['vstar_var_norm'],
-            r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
+            _nan(r['mi_diff']),
             r['H_eps_norm'],
-            r['mce_entropy_norm'],
-        ])
+            _nan(r['mce_entropy_norm']),
+        ], dtype=float)
 
     def _pam_vector_raw(r):
         return np.array([
             r['adv_gap'],
             r['vstar_var_raw'],
-            r['mi_diff'] if r['mi_diff'] is not None else float('nan'),
+            _nan(r['mi_diff']),
             r['H_eps'],
-            r['mce_entropy_raw'],
+            _nan(r['mce_entropy_raw']),
             r['ctrl_adv'],
             r['one_step_recovery'],
-        ])
+        ], dtype=float)
 
     def _r_scale_for(R_type):
         return R_scales.get(R_type, 1.0)
@@ -351,9 +365,9 @@ def run_pam_experiment(
             q1_raw[(S, R_type)] = np.array(pam_raw)
 
     # ------------------------------------------------------------------
-    # Compute empirical 95th-percentile W2 scales from Q1 raw data
+    # Compute empirical 95th-percentile scales from Q1 raw data
     # ------------------------------------------------------------------
-    def _compute_w2_scales(q1_raw_dict, percentile=95):
+    def _compute_baseline_scales(q1_raw_dict, percentile=95):
         pools = [[], []]  # ctrl_adv, one_step
         for mat in q1_raw_dict.values():
             for i in range(5, 7):
@@ -363,7 +377,7 @@ def run_pam_experiment(
         return {k: float(np.percentile(v, percentile)) if v else 1.0
                 for k, v in zip(keys, pools)}
 
-    w2_scales = _compute_w2_scales(q1_raw)
+    w2_scales = _compute_baseline_scales(q1_raw)
 
     # ------------------------------------------------------------------
     # Q2 — variance decomposition: T vs R, across T_structures
@@ -423,6 +437,7 @@ def run_pam_experiment(
     # ------------------------------------------------------------------
     human_cases = [
         ("Chain-Terminal",  make_chain_mdp(10, reward_type='terminal')),
+        ("Chain-BkTrack",   make_chain_mdp(10, reward_type='terminal', backtrack=True)),
         ("Chain-Dense",     make_chain_mdp(10, reward_type='dense')),
         ("Chain-Lottery",   make_chain_mdp(10, reward_type='lottery')),
         ("Chain-Progress",  make_chain_mdp(10, reward_type='progress')),
@@ -436,8 +451,8 @@ def run_pam_experiment(
         if verbose:
             print(f"  scoring {name}...")
         r = _score_mdp(mdp)
-        q3[name] = {**r, **norm_w2(r['ctrl_adv'], r['one_step_recovery'],
-                                    w2_scales),
+        q3[name] = {**r, **norm_baseline(r['ctrl_adv'], r['one_step_recovery'],
+                                          w2_scales),
                     'n_actions': mdp.A}
 
     meta = {
@@ -449,7 +464,7 @@ def run_pam_experiment(
         'noisy_mi_estimates': include_mi,
         'R_scales': R_scales,
         'T_structures': T_structures,
-        'w2_empirical_scales': w2_scales,
+        'baseline_empirical_scales': w2_scales,
     }
 
     results = {'q1': q1, 'q1_raw': q1_raw, 'q2': q2, 'q3': q3, 'meta': meta}
@@ -541,7 +556,7 @@ def _print_pam_results(results: dict) -> None:
     print("  Note: chains have A=2, grids have A=4. MCE entropy is H/log(A),")
     print("  so grids mechanically score higher — control for |A| before comparing.")
     print("=" * 70)
-    score_cols = ['composite', 'adv_gap_norm', 'vstar_var_norm', 'h_eff_norm', 'mce_entropy_norm',
+    score_cols = ['composite', 'adv_gap_norm', 'vstar_var_norm', 'H_eps_norm', 'mce_entropy_norm',
                   'ctrl_adv_norm', 'one_step_norm']
     hdrs3 = ['comp', 'adv_gap', 'v*var', 'h_eff', 'mce_ent', 'ctrl_adv', 'one_step']
     print(f"  {'MDP':<22s} {'|A|':>4s}" + "".join(f"{h:>9s}" for h in hdrs3))
@@ -729,3 +744,88 @@ def run_s_sweep(
                                                rng=np.random.default_rng(int(rng.integers(0, 2**31)))))
             results[(S, T_type)] = scores
     return results
+
+
+# ---------------------------------------------------------------------------
+# Fraction-agentic estimator (Turner et al. 2021 comparison)
+# ---------------------------------------------------------------------------
+
+def fraction_agentic(
+    prior: str,
+    threshold: float = 0.6,
+    n_samples: int = 200,
+    S: int = 10,
+    A: int = 4,
+    gamma: float = 0.95,
+    k: int = 3,
+    R_scale: float = 1.0,
+    n_bootstrap: int = 1000,
+    rng_seed: int = 42,
+    **mdp_kwargs,
+) -> dict:
+    """
+    Estimate P(composite > threshold) under a given reward prior, with bootstrap CI.
+
+    Parameters
+    ----------
+    prior       : R_type string passed to random_mdp — e.g. 'gaussian',
+                  'spike_slab', or 'uniform_simplex' (Turner et al. 2021).
+    threshold   : composite score cutoff defining "agentic" (default 0.6).
+    n_samples   : number of MDPs sampled from the prior.
+    S, A, gamma : MDP dimensions and discount factor.
+    k           : transition fan-out for random_mdp.
+    R_scale     : R_scale argument forwarded to random_mdp (ignored for
+                  'uniform_simplex', where the scale is fixed by the simplex).
+    n_bootstrap : bootstrap resamples for the 95 % CI.
+    rng_seed    : master RNG seed.
+    **mdp_kwargs: extra keyword arguments forwarded to random_mdp.
+
+    Returns
+    -------
+    dict with keys:
+        point_estimate  — fraction of samples with composite > threshold
+        ci_lower        — 2.5th bootstrap percentile
+        ci_upper        — 97.5th bootstrap percentile
+        threshold       — threshold used
+        prior           — prior name used
+        n_samples       — number of MDP samples drawn
+        composites      — array of all composite scores (length n_samples)
+    """
+    rng = np.random.default_rng(rng_seed)
+    composites = []
+
+    for _ in range(n_samples):
+        mdp = random_mdp(
+            S, A, gamma=gamma, k=k,
+            R_type=prior, R_scale=R_scale,
+            terminal_states=1,
+            rng=np.random.default_rng(int(rng.integers(0, 2**31))),
+            **mdp_kwargs,
+        )
+        r = agenticity_score(
+            mdp, verbose=False, compute_mi=False,
+            rng=np.random.default_rng(int(rng.integers(0, 2**31))),
+        )
+        composites.append(r['composite'])
+
+    composites = np.array(composites)
+    point_est = float((composites > threshold).mean())
+
+    # Non-parametric bootstrap CI
+    boot_rng = np.random.default_rng(int(rng.integers(0, 2**31)))
+    boot_means = np.array([
+        (boot_rng.choice(composites, size=n_samples, replace=True) > threshold).mean()
+        for _ in range(n_bootstrap)
+    ])
+    ci_lower = float(np.percentile(boot_means, 2.5))
+    ci_upper = float(np.percentile(boot_means, 97.5))
+
+    return {
+        'point_estimate': round(point_est, 4),
+        'ci_lower':       round(ci_lower, 4),
+        'ci_upper':       round(ci_upper, 4),
+        'threshold':      threshold,
+        'prior':          prior,
+        'n_samples':      n_samples,
+        'composites':     composites,
+    }

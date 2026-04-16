@@ -56,14 +56,25 @@ def gridworld(width, height, goal_xy, step_cost=-1.0, goal_reward=0.0,
 
 
 def make_chain_mdp(n: int = 10, gamma: float = 0.95,
-                   reward_type: str = 'terminal') -> MDP:
-    """Linear chain: action 0 = stay, action 1 = advance. Last state terminal."""
+                   reward_type: str = 'terminal',
+                   backtrack: bool = False) -> MDP:
+    """Linear chain, last state terminal.
+
+    backtrack=False (default): action 0 = stay, action 1 = advance.
+    backtrack=True:            action 0 = left (wall at s=0), action 1 = right.
+      Random policy can drift away from goal; reachability becomes the bottleneck,
+      not just discounting speed.
+    """
     S, A = n, 2
     T = np.zeros((S, A, S))
     for s in range(S - 1):
-        T[s, 0, s] = 1.0
-        T[s, 1, s + 1] = 1.0
-    T[S - 1, :, S - 1] = 1.0 # absorbing terminal
+        if backtrack:
+            T[s, 0, max(s - 1, 0)] = 1.0  # left (wall at 0)
+            T[s, 1, s + 1] = 1.0           # right
+        else:
+            T[s, 0, s] = 1.0               # stay
+            T[s, 1, s + 1] = 1.0           # advance
+    T[S - 1, :, S - 1] = 1.0              # absorbing terminal
 
     R = np.zeros((S, A, S))
     rng_r = np.random.default_rng(0)

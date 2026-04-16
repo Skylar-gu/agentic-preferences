@@ -1,107 +1,152 @@
 # agentic-preferences
 
-A finite MDP research testbed for measuring **agenticity** — proxies for how much an agent's planning matters — using exact dynamic programming (no RL training loops).
+A finite MDP research testbed for measuring **agenticity** — how much an agent's planning matters in a given environment — using exact dynamic programming. No RL training loops.
+
+All metrics are invariant to potential-based reward shaping (`R' = R + γΦ(s') − Φ(s)`).
+
+---
+
+## Repo structure
+
+```
+environments/           Shared library (import from here)
+  core.py               MDP dataclass + all DP / MCE / shaping primitives
+  metrics.py            Shaping-invariant baseline metrics (control_advantage, one_step_recovery)
+  pams.py               PAMs + agenticity_score composite
+  envs.py               Hand-constructed MDPs (chain, grid variants)
+  runners.py            Random MDP generator + batch experiment runners
+
+01_pam_baseline/        Experiment 1 — Q1/Q2/Q3 PAM analysis (Plots 01–08)
+02_sampling_sweeps/     Experiment 2 — Group 1/2/3 sampling sweeps (Plots 09–13)
+
+plans+notes/            Research plans, design notes, and experimental observations
+```
+
+---
+
+## Running experiments
+
+Each experiment folder is self-contained. Run from inside the folder:
+
+```bash
+# Experiment 1 — Q1/Q2/Q3 PAM analysis
+cd 01_pam_baseline
+python 01_build.py          # run experiment, save results/ (~2 min)
+python 01_build.py --fast   # smoke test (~10 sec)
+python 02_eval.py           # print summary tables
+python 03_plot.py           # generate figures/ (PDFs)
+python check_job_status.py  # check if build output is ready
+
+# Experiment 2 — sampling sweeps
+cd 02_sampling_sweeps
+python 01_build.py          # run all sweeps, save results/ (~3-5 min)
+python 01_build.py --fast   # smoke test (~15 sec)
+python 02_eval.py
+python 03_plot.py
+python check_job_status.py
+```
+
+---
 
 ## Dependencies
 
-Python 3.9+, NumPy, SciPy.
-
-## Running
-
-```bash
-# Main experiments + plots
-python environments/plot_pams.py      # plots 01–08: Q1/Q2/Q3 PAM analysis
-python environments/plot_sampling.py  # plots 09–13: p-sweep, γ-sweep, T-sensitivity, S-sweep
-
-# Legacy demos
-python environments/mdp.py            # Week 2 shaping-invariant metrics demo
-```
-
-See `environments/plots_desc.md` for a description of each plot.
+Python 3.9+, NumPy, SciPy, Matplotlib. No install needed — `environments/` is added to `sys.path` at runtime by each experiment script.
 
 ---
 
-## File Reference
+## Library reference
 
 ### `environments/core.py`
-MDP dataclass and all DP primitives. Everything else imports from here.
 
-- `MDP` — dataclass holding `T[S,A,S]`, `R[S,A,S]`, `gamma`, `terminal`, `d0`
-- `value_iteration` — synchronous VI returning V*, Q*, π*
-- `policy_evaluation` — exact V^π via linear system solve
-- `value_under_random_policy` — V under uniform random policy
-- `discounted_occupancy` — discounted state visitation measure d^π
-- `finite_horizon_optimal_policy` — exact h-step backwards induction
-- `finite_horizon_lookahead_policy` — h-step lookahead with arbitrary terminal bootstrap V
-- `soft_value_iteration` — entropy-regularised (MCE) VI returning soft V*, Q*, π
-- `mce_policy` — softmax policy from Q (temperature α)
-- `mce_objective` — MCE objective value
-- `add_potential_shaping` — applies F = γΦ(s') − Φ(s) to R; used to verify shaping invariance
+MDP dataclass and all DP / MCE primitives.
 
----
+- `MDP(S, A, T, R, gamma, terminal, d0)` — tabular MDP
+- `value_iteration` → `(V*, Q*, π*)`
+- `policy_evaluation` → `V^π`
+- `value_under_random_policy` → `V^rand`
+- `discounted_occupancy` → `d^π`
+- `finite_horizon_lookahead_policy` → depth-h lookahead with value bootstrap
+- `soft_value_iteration` → MCE soft Bellman `(V_soft, Q_soft, π_mce)`
+- `add_potential_shaping` → applies `F = γΦ(s') − Φ(s)`
 
-### `environments/week2.py`
-Week 2 shaping-invariant baseline metrics. Both use d0 weighting and cancel Φ offsets.
+### `environments/metrics.py`
 
-- `control_advantage` — E_{s~d0}[V*(s) − V^π0(s)]: how much better optimal is vs baseline
-- `one_step_recovery` — E_{s~d*,a~Uniform,s'~T}[V*(s') − V^π0(s')]: recovery advantage at landing state after a random action
+Shaping-invariant baseline metrics (d0-weighted, cancel Φ via value differences).
 
----
+- `control_advantage(mdp, pi0)` — `E_{d0}[V* − V^{π0}]`
+- `one_step_recovery(mdp, pi0)` — recovery advantage after a random action from optimal occupancy
 
-### `environments/week3.py`
-Week 3/4 PAMs and the composite agenticity score. All metrics are shaping-invariant.
+### `environments/pams.py`
 
-- `advantage_gap` — mean(max_a A* − min_a A*) over non-terminal states, normalised by range(V* − V^rand). Measures per-state action differentiation independent of reward scale.
-- `vstar_variance_corrected` — Var of range-normalised (V* − V^rand); measures spread of the value landscape relative to its own dynamic range. Returns value in [0, 0.25].
-- `early_action_mi` — I(A_{1:k}; G | s0) − I(A_{k+1:T}; G | s0): whether early actions are disproportionately decisive for return. Uses ε-greedy rollouts conditioned on s0.
-- `advantage_sparsity` — fraction of non-terminal (s,a) pairs with |A*(s,a)| < threshold (diagnostic only)
-- `effective_planning_horizon` — H_eps: minimum lookahead depth k for k-step policy to achieve ratio (J* − J^k)/(J* − J^rand) ≤ ε; bootstrap from V^rand. Normalised as H_eps/max_k.
-- `mce_policy_entropy` — entropy of the MCE policy weighted by d0; high = near-uniform policy (flat reward), low = near-deterministic (strong reward signal)
-- `agenticity_score` — composite score combining the above. Default weights: adv_gap=0.25, vstar_var=0.40, mi_diff=0.35. Optionally includes W2 metrics when `w2_scales` is provided.
+PAMs and composite agenticity score. All shaping-invariant.
 
----
+| PAM | Composite weight | Notes |
+|---|---|---|
+| `advantage_gap` | 0.25 | normalised by range(V*−V^rand) |
+| `vstar_variance` | 0.40 | range-normalised variance of V*−V^rand; in [0, 0.25] |
+| `early_action_mi` | 0.35 | I(early actions; G\|s0) − I(late actions; G\|s0); slow, excluded by default |
+| `effective_planning_horizon` | diagnostic | H_eps: min lookahead depth to close J*−J^rand gap; auto-computed max_k |
+| `mce_policy_entropy` | diagnostic | entropy of MCE policy weighted by d0 |
+| `agenticity_score` | — | composite + all individual metrics in one dict |
 
 ### `environments/envs.py`
-Hand-constructed MDP environments used in Q3 and as sanity checks.
 
-- `gridworld` — rectangular grid with slip, absorbing goal; used in legacy Week 2 demo
-- `make_chain_mdp` — linear chain (A=2: stay/advance); reward types: terminal, dense, lottery, progress
-- `make_grid_mdp` — 5×5 grid (A=4: UDLR); reward types: goal, local, cliff
+- `make_chain_mdp(n, reward_type, backtrack)` — 10-state chain (A=2); types: `terminal`, `dense`, `lottery`, `progress`
+- `make_grid_mdp(rows, cols, reward_type)` — 5×5 grid (A=4); types: `goal`, `local`, `cliff`
+- `gridworld(w, h, goal_xy, slip, gamma)` — grid with slip, absorbing goal (shaping-invariant formulation)
 
----
+### `environments/runners.py`
 
-### `environments/experiments.py`
-Random MDP generator and batch experiment runners.
-
-- `random_mdp` — samples a random tabular MDP with configurable S, A, γ, k, R_type, T_type
-- `norm_w2` — normalises W2 metrics via 1−exp(−x/scale) using empirical 95th-pct scales
-- `run_pam_experiment` — main Q1/Q2/Q3 batch experiment:
-  - Q1: fix T, vary R — PAM distributions and cross-PAM correlations by reward type
-  - Q2: vary T structure — variance decomposition of composite into T-share vs R-share
-  - Q3: score 7 hand-constructed MDPs (chain × 4 + grid × 3)
-- `_print_pam_results` — pretty-prints Q1/Q2/Q3 results to stdout
-- `run_p_sweep` — sweeps reward sparsity p for bernoulli or spike_slab R types
-- `run_gamma_sweep` — sweeps discount factor γ across R conditions
-- `run_t_sensitivity` — scores same R samples under uniform vs deterministic T
-- `run_s_sweep` — sweeps state space size S across T types
+- `random_mdp(S, A, gamma, k, R_type, T_type, ...)` — random tabular MDP generator
+  - R_types: `gaussian`, `uniform`, `bernoulli`, `spike_slab`, `potential`, `goal`
+  - T_types: `random`, `dirichlet`, `uniform`, `deterministic`
+- `run_pam_experiment(...)` — Q1/Q2/Q3 batch (used by `01_pam_baseline/`)
+- `run_p_sweep / run_gamma_sweep / run_t_sensitivity / run_s_sweep` — sweep runners (used by `02_sampling_sweeps/`)
 
 ---
 
-### `environments/plot_pams.py`
-Generates plots 01–08 from `run_pam_experiment` output. See `environments/plots_desc.md`.
+## Experiments
 
-### `environments/plot_sampling.py`
-Generates plots 09–13 from the sweep runners. See `environments/plots_desc.md`.
+### `01_pam_baseline` — Q1/Q2/Q3 PAM analysis (Plots 01–08)
 
-### `environments/mdp.py`
-Legacy Week 2 standalone demo. Superseded by the modular architecture above.
+Benchmarks PAMs across random and human-made MDPs.
+
+| Plot | Description |
+|---|---|
+| 01 | Q3 heatmap — 8 human MDPs × 7 normalised PAMs |
+| 02 | Q3 grouped bar — composite + key metrics per MDP |
+| 03 | Q1 boxplots — PAM distributions by reward type (S=10) |
+| 04 | Q2 variance decomp — T vs R share of composite variance |
+| 05 | Q1 scatter — adv_gap vs MCE entropy by reward type |
+| 06 | Q1 radar — mean PAM profile per reward type |
+| 07 | Q1 histograms — agenticity score distributions per reward type |
+| 08 | R_scale sweep — Gaussian σ ∈ {0.1, 0.5, 1.0, 2.0, 5.0} |
+
+### `02_sampling_sweeps` — Group 1/2/3 sampling sweeps (Plots 09–13)
+
+Investigates how PAM scores vary with reward sparsity, discount factor, topology, and state-space size.
+
+| Plot | Description |
+|---|---|
+| 09 | Bernoulli p-sweep — sparsity vs agenticity (lottery failure at p=1.0) |
+| 10 | Spike-and-slab p-sweep — magnitude variation prevents lottery failure |
+| 11 | γ-sweep — PAM scores vs discount factor (S=20) |
+| 12 | T-sensitivity — same R scored under Uniform vs Deterministic T (S=20) |
+| 13 | S-sweep — adv_gap and vstar_var vs state-space size × T type |
 
 ---
 
-## Architecture Notes
+## Plans and notes
 
-**Shaping invariance:** all active metrics (adv_gap, vstar_var, early_action_mi, mce_entropy, H_eps) are invariant to potential shaping F(s,a,s') = γΦ(s') − Φ(s). The W2 metrics (control_advantage, one_step_recovery) are also shaping-invariant. H_eps and mce_entropy are additionally invariant to positive reward scaling and S'-redistribution.
+See `plans+notes/` for research plans, design specs, and experimental observations:
 
-**T-sensitivity:** metrics respond to both R and T by design. Agenticity is a property of an agent in a specific environment, not of R alone. The Q2 variance decomposition characterises how much T vs R drives scores in a given deployment context.
-
-**Composite:** adv_gap and vstar_var share a common reference scale (range(V* − V^rand)), making their contributions commensurable. mi_diff is normalised to [0,1] via (raw + 1)/2. H_eps and mce_entropy are diagnostic and excluded from the composite.
+| File | Contents |
+|---|---|
+| `pipeline.md` | Corpus analysis plan — 15 reward functions from classical RL, RLHF, and verifiable rewards |
+| `pipeline2.md` | Random sampling experiment design — theoretical predictions for Groups 1/2/3 |
+| `mar31.md` | Experimental observations — key findings, metric fixes (H_eps, vstar_var), PAM status |
+| `specmar25.md` | Implementation spec for PAMs and random MDP generator; updated status |
+| `description.md` | Library reference — module descriptions and design notes |
+| `mar16.md` | Environment and metrics reference with result tables |
+| `notes.md` | Open research questions — KL penalty, PRM/ORM, MACHIAVELLI |
+| `plots_desc.md` | Per-plot observations for all 13 figures |
