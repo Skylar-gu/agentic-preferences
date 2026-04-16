@@ -232,5 +232,13 @@ Pan et al. (2023): 134 text-based environments with ground-truth power-seeking a
 
 - `spike_slab` hardcodes σ=1.0 for non-zero entries. Varying σ independently of p requires a separate `R_scale` parameter (currently ignored for spike_slab).
 - Under Uniform T, adv_gap and vstar_var are S-invariant due to range-normalisation cancellation. Whether this is a feature (correct invariance) or a bug (masking a real signal) depends on whether S-scaling matters for the application.
+  - This means:                                                                                                                            
+  The raw metric would have told you something real: under Uniform T, as S grows, an agent's action choices matter less — any action leads to roughly the same mix of successor states. The raw
+  advantage gap would decrease as 1/√S, correctly reflecting that this is a less agentic environment. Large flat environments are genuinely less demanding of planning.                         
+                                         
+  The normalised metric hides this: by dividing numerator and denominator, both of which shrink at the same rate, you get a constant score regardless of S. The plot (Plot 13) confirmed this — 
+  Uniform T stayed high (~0.85) all the way to S=100 instead of collapsing as predicted. 
+  ==> Don't use uniform T as a test condition for S-scaling 
+
 - The right prior for "fraction of reward functions that are agentic" remains open. Gaussian, spike-and-slab, and uniform simplex each weight the reward space differently. The scientifically meaningful prior is over human-written reward functions — more corpus analysis needed.
 - Whether agenticity at random initialisation (Gaussian prior) predicts agenticity post-RLHF fine-tuning is itself an empirical question.

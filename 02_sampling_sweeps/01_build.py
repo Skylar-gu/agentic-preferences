@@ -33,7 +33,7 @@ def main():
         N_R            = 10
         S_VALUES       = [5, 10]
         T_TYPES_SENS   = ['uniform', 'deterministic']
-        T_TYPES_SWEEP  = ['uniform', 'dirichlet']
+        T_TYPES_SWEEP  = ['dirichlet', 'deterministic']
         print("Running in --fast mode (smoke test).")
     else:
         P_VALUES       = [0.01, 0.05, 0.2, 0.5, 1.0]
@@ -43,7 +43,7 @@ def main():
         N_R            = 100
         S_VALUES       = [5, 10, 20, 50, 100]
         T_TYPES_SENS   = ['uniform', 'dirichlet', 'deterministic']
-        T_TYPES_SWEEP  = ['uniform', 'dirichlet', 'deterministic']
+        T_TYPES_SWEEP  = ['dirichlet', 'deterministic']
 
     results = {}
 

@@ -148,9 +148,8 @@ def plot_12_t_sensitivity(t_data, R_conditions, T_types):
 
 def plot_13_s_sweep(s_data, S_values, T_types):
     print("Plot 13: S sweep")
-    T_COLORS_S = {'uniform': '#C44E52', 'dirichlet': '#4C72B0', 'deterministic': '#55A868'}
+    T_COLORS_S = {'dirichlet': '#4C72B0', 'deterministic': '#55A868'}
     T_LABELS_S = {
-        'uniform':       'Uniform T (1/S)',
         'dirichlet':     'Dirichlet(α=0.1)',
         'deterministic': 'Deterministic',
     }

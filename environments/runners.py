@@ -729,7 +729,7 @@ def run_s_sweep(
     if S_values is None:
         S_values = [5, 10, 20, 50, 100]
     if T_types is None:
-        T_types = ['uniform', 'dirichlet', 'deterministic']
+        T_types = ['dirichlet', 'deterministic']
     rng = np.random.default_rng(rng_seed)
     results = {}
     for S in S_values:
